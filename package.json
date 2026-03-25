@@ -5,7 +5,10 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "cd packages/nextjs && npm run dev",
-    "build:contracts": "cd packages/foundry && forge build"
+    "dev": "cd nextjs && npm run dev",
+    "build": "cd nextjs && npm run build",
+    "build:contracts": "cd foundry && forge build",
+    "test:contracts": "cd foundry && forge test",
+    "install:all": "cd nextjs && npm install"
   }
 }
