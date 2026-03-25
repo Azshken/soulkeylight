@@ -2,6 +2,7 @@
 foundry/cache/
 foundry/out/
 foundry/.env
+foundry/lib/
 
 # Next.js
 nextjs/.next/
