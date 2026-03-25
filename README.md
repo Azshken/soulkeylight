@@ -49,6 +49,7 @@ Mint NFT (commitmentHash) → Claim Key (encrypt to wallet) → Soulbound ✓
 
 ## Local Setup
 
+Next.js setup
 ```bash
 # 1. Install dependencies
 npm run install:all
@@ -60,6 +61,13 @@ DATABASE_URL=...
 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=your_id_here
 NEXT_PUBLIC_VAULT_ADDRESS=0x...
 EOF
+```
+Foundry setup
+```bash
+cd foundry 
+forge install
+
+# Edit the .env.example variables
 ```
 
 Visit: http://localhost:3000
