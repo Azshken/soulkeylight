@@ -1,0 +1,11 @@
+{
+  "name": "soulkey",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "cd packages/nextjs && npm run dev",
+    "build:contracts": "cd packages/foundry && forge build"
+  }
+}
