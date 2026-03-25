@@ -36,7 +36,7 @@ Mint NFT (commitmentHash) → Claim Key (encrypt to wallet) → Soulbound ✓
 | Layer          | Technology                                                 |
 | -------------- | ---------------------------------------------------------- |
 | Smart Contract | Solidity, Foundry, OpenZeppelin                            |
-| Frontend       | Next.js, Scaffold-ETH 2, RainbowKit, Wagmi, Viem           |
+| Frontend       | Next.js, RainbowKit, Wagmi, Viem           |
 | Backend / DB   | Next.js API routes, PostgreSQL (Neon)                      |
 | Encryption     | AES-256 (server-side), x25519-xsalsa20-poly1305 (MetaMask) |
 | Payments       | ETH, USDT, USDC                                            |
@@ -51,20 +51,15 @@ Mint NFT (commitmentHash) → Claim Key (encrypt to wallet) → Soulbound ✓
 
 ```bash
 # 1. Install dependencies
-yarn install
+npm run install:all
 
-# 2. Copy environment variables
-cp .env.example .env.local
-# Fill in: ENCRYPTION_KEY, DATABASE_URL, NEXT_PUBLIC_*
-
-# 3. Start local chain
-yarn chain
-
-# 4. Deploy contracts (new terminal)
-yarn deploy
-
-# 5. Start frontend (new terminal)
-yarn start
+# 2. Create and fill in the environment variables
+cat > .env.local << EOF
+ENCRYPTION_KEY=...
+DATABASE_URL=...
+NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=your_id_here
+NEXT_PUBLIC_VAULT_ADDRESS=0x...
+EOF
 ```
 
 Visit: http://localhost:3000
@@ -81,7 +76,7 @@ DATABASE_URL=          # Neon PostgreSQL connection string
 Testing
 
 ```
-yarn foundry:test
+npm run test:contracts
 # or
 forge test --match-path test/SoulKey.t.sol -vv
 ```
@@ -89,7 +84,3 @@ forge test --match-path test/SoulKey.t.sol -vv
 License
 
 AGPL-3.0-only — see [LICENSE](https://github.com/Azshken/SoulKey?tab=AGPL-3.0-1-ov-file)
-
-Built with [Scaffold-ETH 2](https://scaffoldeth.io)
-
-Please see [CONTRIBUTING.MD](https://github.com/scaffold-eth/scaffold-eth-2/blob/main/CONTRIBUTING.md) for more information and guidelines for contributing to Scaffold-ETH 2.
