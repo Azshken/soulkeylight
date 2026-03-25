@@ -861,6 +861,8 @@ const Home: NextPage = () => {
                 {selectedProduct.image_cid ? (
                   <Image
                     src={selectedProduct.image_cid}
+                    loading="eager"
+                    priority
                     alt=""
                     width={720}
                     height={405}
