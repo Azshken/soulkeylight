@@ -1,0 +1,12 @@
+# Foundry
+foundry/cache/
+foundry/out/
+
+# Next.js
+nextjs/.next/
+nextjs/node_modules/
+nextjs/.env.local
+
+# General
+.DS_Store
+*.log
