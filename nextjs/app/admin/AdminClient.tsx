@@ -2,7 +2,7 @@
 // packages/nextjs/app/admin/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
@@ -64,6 +64,7 @@ export default function AdminPage() {
     null,
   );
   const [statusLoading, setStatusLoading] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
   // ── Deregister game state ───────────────────────────────────────────────────
   const [deregContractAddress, setDeregContractAddress] = useState("");
@@ -96,29 +97,36 @@ export default function AdminPage() {
   // ── Auto-fetch contract status when address changes ─────────────────────────
   // Fires on every valid address input — shows DB + baseURI state immediately
   // so the admin sees exactly what needs to be done without any extra clicks.
-  const refreshContractStatus = (address: string) => {
+  const refreshContractStatus = useCallback(async (addr: string) => {
     setStatusLoading(true);
-    fetch(`/api/admin/contract-status?address=${address}`)
-      .then((r) => r.json())
-      .then((d: ContractStatus) => {
-        setContractStatus(d);
-        // Auto-fill baseURI input with the correct expected value
-        setNewBaseURI(d.expectedBaseURI);
-      })
-      .catch(() => setContractStatus(null))
-      .finally(() => setStatusLoading(false));
-  };
+    setContractStatus(null);
+    setStatusError(null);
+    try {
+      const r = await fetch(`/api/admin/contract-status?address=${addr}`);
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.error ?? `API error ${r.status}`);
+      }
+      const d: ContractStatus = await r.json();
+      setContractStatus(d);
+      setNewBaseURI(d.expectedBaseURI);
+    } catch (err: any) {
+      const msg = err.message ?? "Failed to fetch contract status";
+      setStatusError(msg);
+      toast.error(msg);
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []); // ← second argument, the dependency array
 
   useEffect(() => {
-    if (
-      !regContractAddress ||
-      !/^0x[0-9a-fA-F]{40}$/.test(regContractAddress)
-    ) {
+    if (!regContractAddress || !/^0x[0-9a-fA-F]{40}$/.test(regContractAddress)) {
       setContractStatus(null);
+      setStatusError(null);
       return;
     }
     refreshContractStatus(regContractAddress);
-  }, [regContractAddress]);
+  }, [regContractAddress, refreshContractStatus]); // ← add refreshContractStatus
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
@@ -446,6 +454,12 @@ export default function AdminPage() {
           <div className="flex items-center gap-2 mb-4">
             <span className="loading loading-dots loading-sm" />
             <span className="text-sm">Checking contract status...</span>
+          </div>
+        )}
+
+        {statusError && !statusLoading && (
+          <div className="alert alert-error mb-4">
+            <span>⚠️ {statusError}</span>
           </div>
         )}
 
