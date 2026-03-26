@@ -788,64 +788,74 @@ const Home: NextPage = () => {
 
   return (
     <div className="min-h-screen bg-[#0d0f14] text-zinc-100">
-      {/* ── HERO ─────────────────────────────────────────── */}
-      <div className="relative h-72 md:h-48 overflow-hidden">
-        {selectedProduct?.image_cid && (
-          <Image
-            src={selectedProduct.image_cid}
-            alt=""
-            fill
-            className="object-cover scale-110 blur-2xl opacity-25"
-            unoptimized
-          />
-        )}
-        <div className="absolute inset-0 bg-linear-to-b from-[#0d0f14]/20 via-[#0d0f14]/50 to-[#0d0f14]" />
-        <div className="relative z-10 flex flex-col justify-end h-full px-6 pb-10 max-w-6xl mx-auto">
-          <h1 className="text-4xl md:text-6xl font-black tracking-tight text-white drop-shadow-xl">
-            {selectedProduct?.name ?? "Virtual Game Keys"}
-          </h1>
-          {selectedProduct?.genre && (
-            <p className="text-zinc-400 mt-1 text-sm">
-              {selectedProduct.genre}
-            </p>
-          )}
-        </div>
-      </div>
 
-      <div className="max-w-6xl mx-auto px-4 md:px-6 pb-16">
-        {/* ── STORE GAME SELECTOR TABS ─────────────────────── */}
-        {products.length > 1 && (
-          <div className="flex gap-2 mb-6 overflow-x-auto pb-1 scrollbar-hide">
-            {products.map((product) => (
-              <button
-                key={product.product_id}
-                onClick={() => setSelectedProduct(product)}
-                className={`flex items-center gap-2.5 px-4 py-2 rounded-full border text-sm font-medium transition-all duration-200 whitespace-nowrap shrink-0 ${
-                  selectedProduct?.product_id === product.product_id
-                    ? "border-emerald-500 bg-emerald-500/10 text-emerald-400 shadow-md shadow-emerald-500/10"
-                    : "border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
-                }`}
-              >
-                {product.image_cid && (
-                  <div className="relative w-5 h-5 rounded-full overflow-hidden shrink-0">
-                    <Image
-                      src={product.image_cid}
-                      alt=""
-                      fill
-                      className="object-cover"
-                      unoptimized
-                    />
+    {/* ── HERO + GAME SELECTOR ─────────────────────────────────────── */}
+    <div className="relative overflow-hidden">
+      {/* Blurred backdrop */}
+      {selectedProduct?.image_cid && (
+        <Image
+          src={selectedProduct.image_cid}
+          alt=""
+          fill
+          className="object-cover scale-110 blur-2xl opacity-25"
+          unoptimized
+        />
+      )}
+      <div className="absolute inset-0 bg-linear-to-b from-[#0d0f14]/20 via-[#0d0f14]/50 to-[#0d0f14]" />
+
+      {/* Tabs */}
+      {products.length > 0 && (
+        <div className="relative z-10 max-w-6xl mx-auto px-4 md:px-6 overflow-x-auto scrollbar-hide">
+          <div className="flex gap-5 py-13 px-8">
+            {products.map((product) => {
+              const isSelected = selectedProduct?.product_id === product.product_id;
+              return (
+                <button
+                  key={product.product_id}
+                  onClick={() => setSelectedProduct(product)}
+                  className={`group relative flex flex-col items-center shrink-0 rounded-xl border-2 overflow-hidden transition-all duration-200 w-48
+                    ${isSelected
+                      ? "border-emerald-500 shadow-xl shadow-emerald-500/30 scale-105"
+                      : "border-zinc-800 bg-zinc-900/60 hover:border-zinc-600 hover:scale-[1.03] hover:shadow-lg hover:shadow-zinc-900/50"
+                    }`}
+                >
+                  {/* Cover art */}
+                  <div className="relative w-48 h-40 shrink-0 bg-zinc-800">
+                    {product.image_cid ? (
+                      <Image
+                        src={product.image_cid}
+                        alt={product.name}
+                        fill
+                        sizes="192px"
+                        className="object-cover object-center"
+                        unoptimized
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-zinc-600 text-3xl">
+                        🎮
+                      </div>
+                    )}
+                    {isSelected && (
+                      <div className="absolute inset-0 bg-emerald-500/10 pointer-events-none" />
+                    )}
+                    {/* Hover tooltip */}
+                    <div className="absolute inset-0 bg-zinc-950/80 flex flex-col justify-end px-2 pb-2
+                      opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+                      <p className="text-white text-xs font-bold leading-tight truncate">{product.name}</p>
+                      {product.genre && (
+                        <p className="text-zinc-400 text-[10px] truncate mt-0.5">{product.genre}</p>
+                      )}
+                    </div>
                   </div>
-                )}
-                {product.name}
-                {selectedProduct?.product_id === product.product_id && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-                )}
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
-        )}
+        </div>
+      )}
+    </div>
 
+    <div className="max-w-6xl mx-auto px-4 md:px-6 pb-16">
         {/* ── MAIN TWO-COLUMN LAYOUT ───────────────────────── */}
         {selectedProduct && (
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-8 mb-12">

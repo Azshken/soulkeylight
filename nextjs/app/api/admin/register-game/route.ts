@@ -164,7 +164,8 @@ export async function POST(req: NextRequest) {
           genre        = EXCLUDED.genre,
           description  = EXCLUDED.description,
           image_cid    = EXCLUDED.image_cid,
-          metadata_cid = EXCLUDED.metadata_cid
+          metadata_cid = EXCLUDED.metadata_cid,
+          is_active    = true
     `;
 
     return NextResponse.json({

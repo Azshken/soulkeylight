@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
 
     // 1. Check DB
     const dbResult = await sql`
-      SELECT name, metadata_cid, image_cid
+      SELECT name, metadata_cid, image_cid, is_active
       FROM products
       WHERE LOWER(contract_address) = LOWER(${contractAddress})
       LIMIT 1
@@ -58,6 +58,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       inDB: !!dbRow,
+      isActive: dbRow?.is_active ?? null,
       dbName: dbRow?.name ?? null,
       metadataCid: dbRow?.metadata_cid ?? null,
       imageCid: dbRow?.image_cid ?? null,

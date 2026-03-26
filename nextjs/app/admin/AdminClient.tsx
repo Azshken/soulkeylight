@@ -24,6 +24,7 @@ const VAULT_ADDRESS = process.env.NEXT_PUBLIC_VAULT_ADDRESS as
 
 type ContractStatus = {
   inDB: boolean;
+  isActive: boolean | null;
   dbName: string | null;
   metadataCid: string | null;
   imageCid: string | null;
@@ -466,18 +467,24 @@ export default function AdminPage() {
         {contractStatus && (
           <div className="space-y-4">
             {/* DB registration status */}
-            <div
-              className={`alert ${contractStatus.inDB && contractStatus.metadataCid ? "alert-success" : "alert-warning"}`}
-            >
-              {contractStatus.inDB && contractStatus.metadataCid
-                ? `✅ DB registered — "${contractStatus.dbName}" · CID: ${contractStatus.metadataCid?.slice(0, 14)}...`
+            <div className={`alert ${
+              contractStatus.inDB && contractStatus.metadataCid && contractStatus.isActive
+                ? "alert-success"
+                : contractStatus.inDB && contractStatus.isActive === false
+                ? "alert-error"
+                : "alert-warning"
+            } mb-2`}>
+              {contractStatus.inDB && contractStatus.metadataCid && contractStatus.isActive
+                ? `✅ DB registered — ${contractStatus.dbName} · CID ${contractStatus.metadataCid?.slice(0, 14)}...`
+                : contractStatus.inDB && contractStatus.isActive === false
+                ? `⛔ Deregistered — ${contractStatus.dbName} is inactive. Re-register below.`
                 : contractStatus.inDB && !contractStatus.metadataCid
-                  ? `⚠️ DB entry exists for "${contractStatus.dbName}" but metadata CID is missing — re-register below`
-                  : "⚠️ Not in DB — enter the Pinata metadata CID to register"}
+                ? `⚠️ DB entry exists for ${contractStatus.dbName} but metadata CID is missing — re-register below`
+                : `Not in DB — enter the Pinata metadata CID to register`}
             </div>
 
             {/* DB registration form — only shown when not yet registered */}
-            {(!contractStatus.inDB || !contractStatus.metadataCid) && (
+            {(!contractStatus.inDB || !contractStatus.metadataCid || contractStatus.isActive === false) && (
               <div className="form-control">
                 <label className="label">
                   <span className="label-text">Pinata Metadata CID</span>
@@ -509,33 +516,35 @@ export default function AdminPage() {
               </div>
             )}
 
-            <div className="card bg-base-200 shadow p-6 mb-6 border border-error">
-              <h2 className="text-xl font-bold mb-1 text-error">
-                Deregister Game
-              </h2>
-              <p className="text-sm text-base-content/70 mb-4">
-                Removes the game from the vault (no new mints possible) and
-                hides it from the storefront. Existing token holders keep access
-                in their library.
-              </p>
-              <input
-                className="input input-bordered input-error w-full mb-3 font-mono"
-                placeholder="SoulKey contract address 0x..."
-                value={deregContractAddress}
-                onChange={(e) => setDeregContractAddress(e.target.value)}
-                disabled={deregLoading}
-              />
-              <button
-                className="btn btn-error w-full"
-                onClick={deregisterGame}
-                disabled={deregLoading || !deregContractAddress}
-              >
-                {deregLoading ? (
-                  <span className="loading loading-spinner" />
-                ) : null}
-                Deregister Game
-              </button>
-            </div>
+            {contractStatus?.isActive === true && (
+              <div className="card bg-base-200 shadow p-6 mb-6 border border-error">
+                <h2 className="text-xl font-bold mb-1 text-error">
+                  Deregister Game
+                </h2>
+                <p className="text-sm text-base-content/70 mb-4">
+                  Removes the game from the vault (no new mints possible) and
+                  hides it from the storefront. Existing token holders keep access
+                  in their library.
+                </p>
+                <input
+                  className="input input-bordered input-error w-full mb-3 font-mono"
+                  placeholder="SoulKey contract address 0x..."
+                  value={deregContractAddress}
+                  onChange={(e) => setDeregContractAddress(e.target.value)}
+                  disabled={deregLoading}
+                />
+                <button
+                  className="btn btn-error w-full"
+                  onClick={deregisterGame}
+                  disabled={deregLoading || !deregContractAddress}
+                >
+                  {deregLoading ? (
+                    <span className="loading loading-spinner" />
+                  ) : null}
+                  Deregister Game
+                </button>
+              </div>
+            )}
 
             {/* Base URI status */}
             <div
