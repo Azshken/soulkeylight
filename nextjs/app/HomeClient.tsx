@@ -838,14 +838,19 @@ const Home: NextPage = () => {
                     {isSelected && (
                       <div className="absolute inset-0 bg-emerald-500/10 pointer-events-none" />
                     )}
-                    {/* Hover tooltip */}
-                    <div className="absolute inset-0 bg-zinc-950/80 flex flex-col justify-end px-2 pb-2
-                      opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
-                      <p className="text-white text-xs font-bold leading-tight truncate">{product.name}</p>
-                      {product.genre && (
-                        <p className="text-zinc-400 text-[10px] truncate mt-0.5">{product.genre}</p>
-                      )}
-                    </div>
+                  </div>
+
+                  {/* Name bar */}
+                  <div className={`w-full px-2 py-2 text-xs font-semibold text-center truncate transition-colors
+                    ${isSelected
+                      ? "bg-emerald-500/15 text-emerald-300"
+                      : "bg-zinc-900 text-zinc-300 group-hover:text-zinc-100"
+                    }`}
+                  >
+                    {product.name}
+                    {isSelected && (
+                      <span className="ml-1.5 inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 align-middle" />
+                    )}
                   </div>
                 </button>
               );
@@ -854,7 +859,7 @@ const Home: NextPage = () => {
         </div>
       )}
     </div>
-
+    
     <div className="max-w-6xl mx-auto px-4 md:px-6 pb-16">
         {/* ── MAIN TWO-COLUMN LAYOUT ───────────────────────── */}
         {selectedProduct && (
