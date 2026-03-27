@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// packages/nextjs/app/api/admin/generate-keys/route.ts
+// packages/nextjs/app/api/admin/import-keys/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createPublicClient, http, parseAbi, verifyMessage } from "viem";
-
 import { sepolia } from "viem/chains";
-import { encrypt, generateCDKey, hashCDKey } from "@/utils/crypto";
+import { encrypt, hashCDKey } from "@/utils/crypto";
 import {
   createBatch,
+  filterExistingHashes,
   getAvailableKeyCount,
   getOrCreateProduct,
   insertCDKeys,
 } from "@/utils/db";
 
-const MAX_QUANTITY = 1000;
+const MAX_KEYS = 1000;
 const MAX_MESSAGE_AGE_MS = 5 * 60 * 1000;
 
 export async function POST(req: NextRequest) {
@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
       );
 
     const {
-      quantity: rawQuantity,
+      keys: rawKeys,        // string[] of plaintext CD keys
       walletAddress,
       contractAddress,
       batchNotes = "",
@@ -39,7 +39,8 @@ export async function POST(req: NextRequest) {
       !contractAddress ||
       !signature ||
       !message ||
-      !timestamp
+      !timestamp ||
+      !rawKeys
     ) {
       return NextResponse.json(
         { success: false, error: "Missing required fields" },
@@ -56,7 +57,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Verify signature
+    // 2. Verify wallet signature
     const isValidSignature = await verifyMessage({
       address: walletAddress as `0x${string}`,
       message,
@@ -69,10 +70,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Verify on-chain ownership — SoulKey.owner() must match walletAddress
-    const targetChain = sepolia;
+    // 3. Verify on-chain ownership
     const publicClient = createPublicClient({
-      chain: targetChain,
+      chain: sepolia,
       transport: http(process.env.ALCHEMY_RPC_URL),
     });
 
@@ -83,33 +83,41 @@ export async function POST(req: NextRequest) {
     });
 
     if (contractOwner.toLowerCase() !== walletAddress.toLowerCase()) {
-      console.warn(
-        `Unauthorized generate-keys attempt from ${walletAddress}, owner is ${contractOwner}`,
-      );
       return NextResponse.json(
         { success: false, error: "Unauthorized: not the contract owner" },
         { status: 403 },
       );
     }
 
-    // 4. Validate quantity
-    const quantity = Number(rawQuantity ?? 10);
-    if (
-      !Number.isInteger(quantity) ||
-      quantity < 1 ||
-      quantity > MAX_QUANTITY
-    ) {
+    // 4. Validate keys array
+    if (!Array.isArray(rawKeys) || rawKeys.length === 0) {
       return NextResponse.json(
-        {
-          success: false,
-          error: `Quantity must be an integer between 1 and ${MAX_QUANTITY}`,
-        },
+        { success: false, error: "No keys provided" },
+        { status: 400 },
+      );
+    }
+    if (rawKeys.length > MAX_KEYS) {
+      return NextResponse.json(
+        { success: false, error: `Maximum ${MAX_KEYS} keys per batch` },
         { status: 400 },
       );
     }
 
+    // Trim whitespace and filter empties
+    const plainKeys: string[] = rawKeys
+      .map((k: unknown) => String(k).trim())
+      .filter((k) => k.length > 0);
+
+    if (plainKeys.length === 0) {
+      return NextResponse.json(
+        { success: false, error: "All provided keys were empty" },
+        { status: 400 },
+      );
+    }
+
+    // 5. Check vault registration
     const vaultAddress = await publicClient.readContract({
-      address: contractAddress,
+      address: contractAddress as `0x${string}`,
       abi: parseAbi(["function vault() view returns (address)"]),
       functionName: "vault",
     });
@@ -117,7 +125,7 @@ export async function POST(req: NextRequest) {
       address: vaultAddress,
       abi: parseAbi(["function registeredGames(address) view returns (bool)"]),
       functionName: "registeredGames",
-      args: [contractAddress],
+      args: [contractAddress as `0x${string}`],
     });
     if (!isRegistered)
       return NextResponse.json(
@@ -125,41 +133,58 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
 
-    // 5. Resolve product — create if first time this contract is seen
-    const productId = await getOrCreateProduct(contractAddress);
+    // 6. Encrypt + hash each plaintext key
+    const keyRows = plainKeys.map((cdkey) => ({
+      encrypted_key: encrypt(cdkey),
+      commitment_hash: hashCDKey(cdkey),
+    }));
 
-    // 6. Create batch record first — keys belong to a batch
-    const batchId = await createBatch(productId, batchNotes);
+    // 7. Pre-filter duplicates — before touching batches or sequences
+    // Deduplicate within the submitted batch itself (keeps first occurrence)
+    const seen = new Set<string>();
+    const dedupedKeyRows = keyRows.filter((k) => {
+      if (seen.has(k.commitment_hash)) return false;
+      seen.add(k.commitment_hash);
+      return true;
+    });
+    const intraBatchDuplicates = keyRows.length - dedupedKeyRows.length;
 
-    // 7. Generate keys and collect for bulk insert
-    const keys: { commitmentHash: string }[] = [];
-    const keyRows: { encrypted_key: string; commitment_hash: string }[] = [];
+    // Then filter against the DB
+    const allHashes = dedupedKeyRows.map((k) => k.commitment_hash);
+    const existingHashes = await filterExistingHashes(allHashes);
+    const newKeyRows = dedupedKeyRows.filter((k) => !existingHashes.has(k.commitment_hash));
+    const dbDuplicates = dedupedKeyRows.length - newKeyRows.length;
+    const duplicates = intraBatchDuplicates + dbDuplicates;
 
-    for (let i = 0; i < quantity; i++) {
-      const cdkey = generateCDKey();
-      const commitmentHash = hashCDKey(cdkey);
-      const encryptedKey = encrypt(cdkey);
-      keyRows.push({
-        encrypted_key: encryptedKey,
-        commitment_hash: commitmentHash,
-      });
-      keys.push({ commitmentHash });
+    // 8. Bail out early if everything was a duplicate — no batch created, no sequence incremented
+    if (newKeyRows.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `All ${duplicates} key(s) already exist in the database — nothing imported`,
+          duplicates,
+          count: 0,
+        },
+        { status: 409 },
+      );
     }
 
-    await insertCDKeys(batchId, keyRows);
+    // 9. Only now create the product + batch
+    const productId = await getOrCreateProduct(contractAddress);
+    const batchId = await createBatch(productId, batchNotes);
+    await insertCDKeys(batchId, newKeyRows);
 
-    // 8. Count total unminted keys for this contract
     const totalAvailable = await getAvailableKeyCount(contractAddress);
 
     return NextResponse.json({
       success: true,
-      count: keys.length,
-      keys,
+      count: newKeyRows.length,
+      duplicates,
       batchId,
       totalAvailable,
     });
   } catch (error: any) {
-    console.error("Generate Keys API error:", error);
+    console.error("Import Keys API error:", error);
     return NextResponse.json(
       { success: false, error: error.message || "Internal server error" },
       { status: 500 },

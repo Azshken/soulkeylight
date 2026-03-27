@@ -43,3 +43,9 @@
 25/03/26
 
 - Re-initialized the whole project without the scaffold-eth, purely just by creating a foundry and nextjs directories. 
+
+27/03/26
+
+- Automatic generate-keys was changed to a manual import-keys
+- Fixed duplicate key entries in database
+- Fixed phantom duplicate counting 

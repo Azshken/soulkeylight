@@ -202,6 +202,19 @@ Refactoring the code:
 - Re-initialized the whole project without the scaffold-eth, purely just by creating a foundry and nextjs directories - the project cannot be more lean and snappy than this.
 - Most up to date dependecies as possible.
 
+26/03/26
+
+- Fixed the /admin page ui where the Game Setup menu was not showing up correctly.
+- /page ui update with larger tabs for game selection. Also game selection is now the Hero section.
+
+27/03/26
+
+- Changed the /admin page key-generation manual key insertion single/batch keys
+  - More like the real Game key stores.
+- Database bug: Same CD key could be put into the DB multiple times.
+  - added a unique constraint on commitmentHash -> new bug: duplicate cd key insertions were incrementing the cdkey_id and the batch_id even if no key was added -> all fixed
+
+
 Notes:
 
 - This type of learning suits me the best (vibe coding). I have ideas in my head and no years of expertise. I can't learn for the sake of learning I hit a wall (because there is so much to know), get quickly demotivated and lose my goal by learning bloat that I may or may not use for my project ideas. With vibe coding I do, then fill up the gaps of knowledge by understanding how the pieces connect and how they work; step by step.

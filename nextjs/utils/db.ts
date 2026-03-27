@@ -70,7 +70,6 @@ export async function insertCDKeys(
   batchId: number,
   keys: { encrypted_key: string; commitment_hash: string }[],
 ): Promise<void> {
-  // Insert one by one — Vercel postgres doesn't support bulk parameterised inserts via tagged template
   for (const key of keys) {
     await sql`
       INSERT INTO cd_keys (batch_id, encrypted_key, commitment_hash, created_at)
@@ -262,6 +261,21 @@ export async function getCDKeyByTokenId(
     LIMIT 1
   `;
   return (result.rows[0] as CDKeyWithRedemption) ?? null;
+}
+
+// Returns the set of hashes that already exist in the DB
+export async function filterExistingHashes(
+  hashes: string[],
+): Promise<Set<string>> {
+  if (hashes.length === 0) return new Set();
+
+  
+  // Build explicit OR chain — avoids ANY() array parameter issues with @vercel/postgres
+  const placeholders = hashes.map((h) => `'${h}'`).join(", ");
+  const result = await sql.query(
+    `SELECT commitment_hash FROM cd_keys WHERE commitment_hash IN (${placeholders})`,
+  );
+  return new Set(result.rows.map((r) => r.commitment_hash as string));
 }
 
 /**
