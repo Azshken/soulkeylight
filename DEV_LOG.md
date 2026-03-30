@@ -188,14 +188,14 @@ Refactoring the code:
   - Now is_active attribute in products table, tracking game registration
   - Deregister Game option added in /admin page
 
-  23/03/26
+23/03/26
   
-  - Deployed a Deus Ex Soulkey with baseURI and metadata to test out multiple game deployments.
-  - I've removed all the scaffolding and redesigned the Header and the Footer.
+- Deployed a Deus Ex Soulkey with baseURI and metadata to test out multiple game deployments.
+- I've removed all the scaffolding and redesigned the Header and the Footer.
 
-  24/03/26
+24/03/26
 
-  - This was a tough one. Fully removed the Scaffold-ETH 2 had problems with yarn installing on Vercel when using npm. 
+- This was a tough one. Fully removed the Scaffold-ETH 2 had problems with yarn installing on Vercel when using npm. 
 
 25/03/26
 
@@ -214,6 +214,9 @@ Refactoring the code:
 - Database bug: Same CD key could be put into the DB multiple times.
   - added a unique constraint on commitmentHash -> new bug: duplicate cd key insertions were incrementing the cdkey_id and the batch_id even if no key was added -> all fixed
 
+29/03/26
+
+- Went through my notes and sessions with perplexity and made Claude memory/context files
 
 Notes:
 
