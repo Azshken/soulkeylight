@@ -48,10 +48,3 @@ export function encryptWithPublicKey(data: string, publicKey: string): string {
   // Convert to hex string for easy transmission
   return Buffer.from(JSON.stringify(encrypted), "utf8").toString("hex");
 }
-
-// Decrypt function (user decrypts with MetaMask on client-side)
-export function prepareForMetaMaskDecrypt(encryptedHex: string): string {
-  // This just formats the encrypted data for MetaMask's eth_decrypt
-  // Actual decryption happens client-side via MetaMask
-  return encryptedHex;
-}

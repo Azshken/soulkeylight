@@ -301,28 +301,27 @@ export async function createRedemptionRecord(
  * Finalises the redemption record after claimCdKey tx confirms on-chain.
  * Also deletes the server-side encrypted_key — it is no longer needed.
  */
+// Two separate, explicit functions
 export async function confirmRedemption(params: {
   cdkeyId: number;
   redeemedBy: string;
   redemptionTxHash: string;
   blockNumber: bigint;
 }): Promise<void> {
+  // Only saves the redemption record — does NOT touch encryptedkey
   await sql`
     UPDATE redemptions
-    SET
-      redeemed_by    = ${params.redeemedBy},
-      redeemed_at    = NOW(),
-      redemption_tx_hash = ${params.redemptionTxHash},
-      block_number   = ${params.blockNumber.toString()}
-    WHERE cdkey_id = ${params.cdkeyId}
+    SET redeemedby        = ${params.redeemedBy},
+        redeemedat        = NOW(),
+        redemptiontxhash  = ${params.redemptionTxHash},
+        blocknumber       = ${params.blockNumber.toString()}
+    WHERE cdkeyid = ${params.cdkeyId}
   `;
+}
 
-  // Remove server-side plaintext encryption — key now lives on-chain only
-  await sql`
-    UPDATE cd_keys
-    SET encrypted_key = NULL
-    WHERE id = ${params.cdkeyId}
-  `;
+// Called explicitly as the very last step in confirm/route.ts
+export async function clearEncryptedKey(cdkeyId: number): Promise<void> {
+  await sql`UPDATE cdkeys SET encryptedkey = NULL WHERE id = ${cdkeyId}`;
 }
 
 // ============ Reserve release helper ============

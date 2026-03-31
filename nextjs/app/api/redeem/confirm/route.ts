@@ -1,44 +1,57 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// packages/nextjs/app/api/redeem/confirm/route.ts
-import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@vercel/postgres";
-
-import { confirmRedemption, recordReserveRelease } from "@/utils/db";
+// nextjs/app/api/redeem/confirm/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { sql } from '@vercel/postgres';
+import { createPublicClient, http, getAddress } from 'viem';
+import { sepolia } from 'viem/chains';
+import { SOULKEY_ABI } from '@/utils/abis';
+import { confirmRedemption, recordReserveRelease, clearEncryptedKey } from '@/utils/db';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => null);
-    if (!body)
-      return NextResponse.json(
-        { success: false, error: "Invalid JSON body" },
-        { status: 400 },
-      );
+    if (!body) return NextResponse.json({ success: false, error: 'Invalid JSON body' }, { status: 400 });
 
-    const {
-      cdkeyId,
-      userAddress,
-      txHash,
-      blockNumber,
-      contractAddress,
-      tokenId,
-    } = body;
+    const { cdkeyId, userAddress, txHash, blockNumber, contractAddress, tokenId } = body;
+    if (!cdkeyId || !userAddress || !txHash || !blockNumber || !contractAddress || !tokenId)
+      return NextResponse.json({ success: false, error: 'Missing required fields' }, { status: 400 });
 
-    if (
-      !cdkeyId ||
-      !userAddress ||
-      !txHash ||
-      !blockNumber ||
-      !contractAddress ||
-      !tokenId
-    ) {
+    const rpcUrl = process.env.ALCHEMY_RPC_URL;
+    if (!rpcUrl) return NextResponse.json({ success: false, error: 'Server misconfiguration: missing RPC' }, { status: 500 });
+
+    const publicClient = createPublicClient({ chain: sepolia, transport: http(rpcUrl) });
+
+    // ── STEP 1: Verify the tx succeeded on-chain ──────────────────────────────
+    // Do NOT trust client-provided status. Fetch the receipt ourselves.
+    const receipt = await publicClient.getTransactionReceipt({ hash: txHash as `0x${string}` });
+
+    if (!receipt || receipt.status !== 'success') {
+      // tx reverted or not yet mined — key stays in DB, user can retry
       return NextResponse.json(
-        { success: false, error: "Missing required fields" },
-        { status: 400 },
+        { success: false, error: 'Transaction not confirmed or reverted on-chain. Key is safe — please retry.' },
+        { status: 400 }
       );
     }
 
-    // 1. Finalise redemption record: sets redeemed_by, redeemed_at, tx data
-    //    and nulls out encrypted_key on the cd_keys row (server copy no longer needed)
+    // ── STEP 2: Confirm the NFT is actually soulbound on-chain ────────────────
+    // Guards against edge cases where a receipt arrives but the claim didn't stick.
+    const claimTimestamp = await publicClient.readContract({
+      address: getAddress(contractAddress),
+      abi: SOULKEY_ABI,
+      functionName: 'getClaimTimestamp',
+      args: [BigInt(tokenId)],
+    }) as bigint;
+
+    if (claimTimestamp === 0n) {
+      return NextResponse.json(
+        { success: false, error: 'Token not yet claimed on-chain. Key is safe — please retry.' },
+        { status: 400 }
+      );
+    }
+
+    // ── STEP 3: Finalise redemption record ────────────────────────────────────
+    // Key is confirmed on-chain. Safe to write the DB redemption record.
+    // encryptedkey is NOT touched yet.
     await confirmRedemption({
       cdkeyId: Number(cdkeyId),
       redeemedBy: userAddress,
@@ -46,90 +59,74 @@ export async function POST(req: NextRequest) {
       blockNumber: BigInt(blockNumber),
     });
 
-    // 2. Fetch product data from DB — needed to build the frozen metadata snapshot
+    // ── STEP 4: Pinata frozen metadata upload (non-fatal) ─────────────────────
     const productResult = await sql`
-      SELECT p.name, p.genre, p.description, p.image_claimed_cid
+      SELECT p.name, p.genre, p.description, p.imageclaimedcid
       FROM products p
-      WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
+      WHERE LOWER(p.contractaddress) = LOWER(${contractAddress})
       LIMIT 1
     `;
 
     if (productResult.rows[0]) {
-      const product = productResult.rows[0];
-      const gameName = product.name ?? "Unknown Game";
-      const genre = product.genre ?? "";
-      const imageCid = product.image_claimed_cid ?? null;
+      const { name, genre, description, imageclaimedcid: imageCid } = productResult.rows[0];
 
-      // Only attempt Pinata upload if we have the image CID and JWT configured
       if (imageCid && process.env.PINATA_JWT) {
         const frozenMetadata = {
-          name: `${gameName} CD Key #${tokenId}`,
-          description:
-            product.description || `A claimed game key for ${gameName}.`,
+          name: `${name} CD Key #${tokenId}`,
+          description: `${description} A claimed game key for ${name}.`,
           image: `ipfs://${imageCid}`,
-          external_url: process.env.NEXT_PUBLIC_APP_URL ?? "",
+          external_url: process.env.NEXT_PUBLIC_APP_URL ?? '',
           attributes: [
-            { trait_type: "Game", value: gameName },
-            { trait_type: "Genre", value: genre },
-            { trait_type: "Status", value: "Soulbound" },
+            { trait_type: 'Game',     value: name  },
+            { trait_type: 'Genre',    value: genre },
+            { trait_type: 'Status',   value: 'Soulbound' },
           ],
         };
-
         try {
-          const pinataRes = await fetch(
-            "https://api.pinata.cloud/pinning/pinJSONToIPFS",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${process.env.PINATA_JWT}`,
-              },
-              body: JSON.stringify({
-                pinataContent: frozenMetadata,
-                pinataMetadata: {
-                  name: `soulkey-${contractAddress}-token-${tokenId}`,
-                },
-              }),
-              signal: AbortSignal.timeout(10000),
+          const pinataRes = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${process.env.PINATA_JWT}`,
             },
-          );
+            body: JSON.stringify({
+              pinataContent: frozenMetadata,
+              pinataMetadata: { name: `soulkey-${contractAddress}-token-${tokenId}` },
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
 
           if (pinataRes.ok) {
-            const pinataData = await pinataRes.json();
-            const frozenCid: string = pinataData.IpfsHash;
-
-            // Store frozen CID — tokenURI route redirects to this permanently after claim
+            const { IpfsHash: frozenCid } = await pinataRes.json();
             await sql`
-              UPDATE redemptions
-              SET frozen_metadata_cid = ${frozenCid}
-              WHERE cdkey_id = ${Number(cdkeyId)}
+              UPDATE redemptions SET frozenmetadatacid = ${frozenCid} WHERE cdkeyid = ${Number(cdkeyId)}
             `;
           } else {
-            // Pinata upload failed — log but don't block the claim confirmation.
-            // The tokenURI route falls back to dynamic JSON if frozen_metadata_cid is null.
-            console.error("Pinata upload failed:", await pinataRes.text());
+            console.error('Pinata upload failed', await pinataRes.text());
           }
         } catch (pinataErr) {
-          // Network timeout or Pinata outage — same fallback as above
-          console.error("Pinata upload error (non-fatal):", pinataErr);
+          console.error('Pinata upload error (non-fatal):', pinataErr);
         }
       }
     }
 
-    // 3. Record reserve release (claim path)
+    // ── STEP 5: Record reserve release ────────────────────────────────────────
     await recordReserveRelease({
       cdkeyId: Number(cdkeyId),
-      releaseReason: "claim",
+      releaseReason: 'claim',
       txHash,
       blockNumber: BigInt(blockNumber),
     });
 
+    // ── STEP 6: Delete the server-side AES key — LAST, after everything ───────
+    // Only reached if all prior steps succeeded. Key is confirmed on-chain.
+    // Even if this step somehow fails, the user can still decrypt via Reveal CD Key
+    // (which reads getEncryptedCDKey directly from the contract).
+    await clearEncryptedKey(Number(cdkeyId));
+
     return NextResponse.json({ success: true });
   } catch (error: any) {
-    console.error("Redeem Confirm API error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message || "Internal server error" },
-      { status: 500 },
-    );
+    console.error('Redeem Confirm API error:', error);
+    return NextResponse.json({ success: false, error: error.message ?? 'Internal server error' }, { status: 500 });
   }
 }

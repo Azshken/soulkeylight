@@ -15,6 +15,7 @@ import {
 } from "wagmi";
 
 import { SOULKEY_ABI, VAULT_ABI } from "../utils/abis";
+import { toBytes32, toHexBytes } from '@/utils/helpers';
 import { toast } from "sonner";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -59,34 +60,6 @@ type PaymentRecord = readonly [
   bigint,
   `0x${string}`,
 ];
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Ensures a hex string is 0x-prefixed AND is exactly 32 bytes (64 hex chars).
- * Throws a descriptive error if the server returned a malformed value —
- * without this guard the failure surfaces as an opaque viem ABI encoding error
- * that gives the user no actionable information.
- */
-function toBytes32(hex: string): `0x${string}` {
-  const normalized = (hex.startsWith("0x") ? hex : "0x" + hex) as `0x${string}`;
-  if (!/^0x[0-9a-fA-F]{64}$/.test(normalized)) {
-    throw new Error(
-      `Server returned a malformed 32-byte hash: "${normalized}". ` +
-        `Expected 0x followed by exactly 64 hex characters.`,
-    );
-  }
-  return normalized;
-}
-
-// Second helper. Variable-lenght bytes that validates hex format without
-// constraining length:
-function toHexBytes(hex: string): `0x${string}` {
-  const normalized = (hex.startsWith("0x") ? hex : "0x" + hex) as `0x${string}`;
-  if (!/^0x[0-9a-fA-F]*$/.test(normalized))
-    throw new Error(`Server returned a malformed hex value`);
-  return normalized;
-}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -549,10 +522,17 @@ const Home: NextPage = () => {
         ],
       });
 
-      setMintingStep("Confirming redemption...");
+      setMintingStep("Waiting for claim confirmation...");
       const receipt = await publicClient.waitForTransactionReceipt({
         hash: txHash,
       });
+
+      // Guard against reverted transactions
+      if (receipt.status !== 'success') {
+        throw new Error('claimCdKey transaction reverted. Your key is safe — please try again.');
+      }
+
+      setMintingStep("Confirming redemption...");
 
       await fetch("/api/redeem/confirm", {
         method: "POST",
