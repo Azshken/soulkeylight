@@ -32,6 +32,7 @@ vi.mock("@/utils/crypto", () => ({
 }));
 
 import { getIronSession } from "iron-session";
+import { createPublicClient } from "viem";
 import { POST as registerGame } from "@/app/api/admin/register-game/route";
 import { POST as deregisterGame } from "@/app/api/admin/deregister-game/route";
 import { POST as importKeys } from "@/app/api/admin/import-keys/route";
@@ -50,7 +51,7 @@ function makePost(url: string, body: unknown): NextRequest {
   });
 }
 
-const CONTRACT = "0xGameContract000000000000000000000000001";
+const CONTRACT = "0x0000000000000000000000000000000000001111";
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -98,7 +99,6 @@ describe("Admin route auth guard — unauthenticated requests", () => {
 
   it("none of the protected routes call any DB or RPC logic when unauthenticated", async () => {
     const { sql } = await import("@vercel/postgres");
-    const { createPublicClient } = await import("viem");
 
     const routes = [
       makePost("http://localhost/api/admin/register-game", { contractAddress: CONTRACT, metadataCid: "Qm" }),
@@ -112,15 +112,15 @@ describe("Admin route auth guard — unauthenticated requests", () => {
     }
 
     expect(sql).not.toHaveBeenCalled();
-    expect(createPublicClient).not.toHaveBeenCalled();
+    expect(vi.mocked(createPublicClient)).not.toHaveBeenCalled();
   });
 });
 
 // ── Ownership guard (authenticated but wrong contract owner) ──────────────────
 
 describe("Admin route ownership guard — authenticated but wrong owner", () => {
-  const REAL_OWNER = "0xRealOwner00000000000000000000000000001";
-  const SESSION_ADDRESS = "0xImpostor0000000000000000000000000000001";
+  const REAL_OWNER    = "0x0000000000000000000000000000000000002222";
+  const SESSION_ADDRESS = "0x0000000000000000000000000000000000003333";
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -132,11 +132,10 @@ describe("Admin route ownership guard — authenticated but wrong owner", () => 
     } as any);
 
     // On-chain owner returns a different address than the session address
-    const { createPublicClient } = require("viem");
     vi.mocked(createPublicClient).mockReturnValue({
       readContract: vi.fn().mockResolvedValue(REAL_OWNER),
       verifyMessage: vi.fn().mockResolvedValue(true),
-    });
+    } as any);
   });
 
   it("register-game returns 403 when session address is not the game contract owner", async () => {

@@ -1,6 +1,7 @@
 // nextjs/tests/admin/verify.test.ts
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+import type { AdminSessionData } from "@/utils/adminSession";
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -19,7 +20,7 @@ vi.mock("viem", async (importOriginal) => {
   };
 });
 
-process.env.NEXT_PUBLIC_VAULT_ADDRESS = "0xVaultAddress000000000000000000000000000";
+process.env.NEXT_PUBLIC_VAULT_ADDRESS = "0x0000000000000000000000000000000000004444";
 process.env.ALCHEMY_RPC_URL = "https://mock-rpc.example.com";
 
 import { getIronSession } from "iron-session";
@@ -29,8 +30,8 @@ import { POST } from "@/app/api/admin/verify/route";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const OWNER_ADDRESS = "0xOwnerAddress00000000000000000000000000001";
-const VAULT_ADDRESS = "0xVaultAddress000000000000000000000000000";
+const OWNER_ADDRESS = "0x0000000000000000000000000000000000005555";
+const VAULT_ADDRESS = "0x0000000000000000000000000000000000004444";
 const VALID_NONCE = "TestNonce1234567";
 const VALID_DOMAIN = "localhost:3000";
 const VALID_SIGNATURE = "0xsignature";
@@ -47,8 +48,10 @@ const VALID_FIELDS = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeSession(overrides: Record<string, unknown> = {}) {
-  return { save: vi.fn().mockResolvedValue(undefined), ...overrides };
+type MockSession = AdminSessionData & { save: ReturnType<typeof vi.fn> };
+
+function makeSession(overrides: Partial<AdminSessionData> = {}): MockSession {
+  return { save: vi.fn().mockResolvedValue(undefined), ...overrides } as MockSession;
 }
 
 function makeRequest(body: unknown, host = VALID_DOMAIN): NextRequest {
@@ -235,7 +238,7 @@ describe("POST /api/admin/verify", () => {
   // ── Ownership check ─────────────────────────────────────────────────────────
 
   it("returns 403 when the signing address is not the vault owner", async () => {
-    mockPublicClient({ vaultOwner: "0xDifferentOwner000000000000000000000000001" });
+    mockPublicClient({ vaultOwner: "0x0000000000000000000000000000000000006666" });
 
     const res = await POST(makeRequest({ message: "ok", signature: VALID_SIGNATURE }));
     const body = await res.json();
