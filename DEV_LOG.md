@@ -226,6 +226,11 @@ Refactoring the code:
 - Added nextjs tests.
 - Deleted CDKeyEncryption.ts component. No longer needed, the encryption is handled elsewhere.
 
+01/03/26
+
+- Swapped the viem.verigyMessage to SIWE authentication -> tighter security
+- Added tests
+
 Notes:
 
 - This type of learning suits me the best (vibe coding). I have ideas in my head and no years of expertise. I can't learn for the sake of learning I hit a wall (because there is so much to know), get quickly demotivated and lose my goal by learning bloat that I may or may not use for my project ideas. With vibe coding I do, then fill up the gaps of knowledge by understanding how the pieces connect and how they work; step by step.

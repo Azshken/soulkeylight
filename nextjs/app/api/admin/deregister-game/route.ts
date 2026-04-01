@@ -1,66 +1,74 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// nextjs/app/api/admin/deregister-game/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
-import { verifyMessage } from "viem";
+import { createPublicClient, http, parseAbi } from "viem";
+import { sepolia } from "viem/chains";
+import { requireAdminSession } from "@/utils/adminSession";
 
-const MAX_MESSAGE_AGE_MS = 5 * 60 * 1000;
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  const auth = await requireAdminSession();
+  if ("error" in auth) return auth.error;
+  const { address: walletAddress } = auth;
 
-export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => null);
-    if (!body)
-      return NextResponse.json(
-        { success: false, error: "Invalid JSON" },
-        { status: 400 },
-      );
+    if (!body) {
+      return NextResponse.json({ success: false, error: "Invalid JSON body" }, { status: 400 });
+    }
 
-    const { walletAddress, contractAddress, signature, message, timestamp } =
-      body;
-    if (
-      !walletAddress ||
-      !contractAddress ||
-      !signature ||
-      !message ||
-      !timestamp
-    )
-      return NextResponse.json(
-        { success: false, error: "Missing required fields" },
-        { status: 400 },
-      );
+    const { contractAddress } = body;
 
-    const messageAge = Date.now() - Number(timestamp);
-    if (messageAge > MAX_MESSAGE_AGE_MS || messageAge < 0)
+    if (!contractAddress || !/^0x[0-9a-fA-F]{40}$/.test(contractAddress)) {
       return NextResponse.json(
-        { success: false, error: "Signature expired" },
-        { status: 401 },
+        { success: false, error: "Missing or invalid contract address" },
+        { status: 400 }
       );
+    }
 
-    const isValid = await verifyMessage({
-      address: walletAddress,
-      message,
-      signature,
+    const publicClient = createPublicClient({
+      chain: sepolia,
+      transport: http(process.env.ALCHEMY_RPC_URL),
     });
-    if (!isValid)
-      return NextResponse.json(
-        { success: false, error: "Invalid signature" },
-        { status: 401 },
-      );
 
+    // ── On-chain ownership check ──────────────────────────────────────────
+    const contractOwner = await publicClient.readContract({
+      address: contractAddress as `0x${string}`,
+      abi: parseAbi(["function owner() view returns (address)"]),
+      functionName: "owner",
+    });
+
+    if (contractOwner.toLowerCase() !== walletAddress.toLowerCase()) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized: not the contract owner" },
+        { status: 403 }
+      );
+    }
+
+    // ── Mark inactive in DB ───────────────────────────────────────────────
     const result = await sql`
-      UPDATE products SET is_active = false
+      UPDATE products
+      SET is_active = false
       WHERE LOWER(contract_address) = LOWER(${contractAddress})
       RETURNING name
     `;
-    if (!result.rows[0])
-      return NextResponse.json(
-        { success: false, error: "Contract not found in DB" },
-        { status: 404 },
-      );
 
-    return NextResponse.json({ success: true, name: result.rows[0].name });
-  } catch (err: any) {
+    if (result.rowCount === 0) {
+      return NextResponse.json(
+        { success: false, error: "Game not found in database" },
+        { status: 404 }
+      );
+    }
+
+    const gameName = result.rows[0].name as string;
+
+    return NextResponse.json({ success: true, name: gameName });
+  } catch (error: any) {
+    console.error("Deregister Game API error:", error);
     return NextResponse.json(
-      { success: false, error: err.message },
-      { status: 500 },
+      { success: false, error: error.message ?? "Internal server error" },
+      { status: 500 }
     );
   }
 }

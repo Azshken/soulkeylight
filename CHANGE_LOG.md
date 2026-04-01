@@ -55,3 +55,8 @@
 - Fixed the failed on-chain claim TX deleted a CD key in databas
 - Added nextjs tests
 - Deleted CDKeyEncryption.ts component it was an relic from previous implementations
+
+01/03/26
+
+- Changed viem.verifyMessage to SIWE
+- Added tests
