@@ -61,20 +61,20 @@ export async function POST(req: NextRequest) {
 
     // ── STEP 4: Pinata frozen metadata upload (non-fatal) ─────────────────────
     const productResult = await sql`
-      SELECT p.name, p.genre, p.description, p.imageclaimedcid
+      SELECT p.name, p.genre, p.description, p.image_claimed_cid
       FROM products p
-      WHERE LOWER(p.contractaddress) = LOWER(${contractAddress})
+      WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
       LIMIT 1
     `;
 
     if (productResult.rows[0]) {
-      const { name, genre, description, imageclaimedcid: imageCid } = productResult.rows[0];
+      const { name, genre, description, image_claimed_cid: imageCid } = productResult.rows[0];
 
       if (imageCid && process.env.PINATA_JWT) {
         const frozenMetadata = {
           name: `${name} CD Key #${tokenId}`,
           description: `${description} A claimed game key for ${name}.`,
-          image: `ipfs://${imageCid}`,
+          image: `https://purple-historical-sawfish-33.mypinata.cloud/ipfs/${imageCid}`,
           external_url: process.env.NEXT_PUBLIC_APP_URL ?? '',
           attributes: [
             { trait_type: 'Game',     value: name  },
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest) {
           if (pinataRes.ok) {
             const { IpfsHash: frozenCid } = await pinataRes.json();
             await sql`
-              UPDATE redemptions SET frozenmetadatacid = ${frozenCid} WHERE cdkeyid = ${Number(cdkeyId)}
+              UPDATE redemptions SET frozen_metadata_cid = ${frozenCid} WHERE cdkey_id = ${Number(cdkeyId)}
             `;
           } else {
             console.error('Pinata upload failed', await pinataRes.text());

@@ -218,6 +218,14 @@ Refactoring the code:
 
 - Went through my notes and sessions with perplexity and made Claude memory/context files
 
+31/03/26
+
+- Major bug: when the TX on-chain fails during redemption the backend deletes the key from the database anyways.
+  - Separated confirmRedemption and clearEncryptedKey in utils/db.ts
+  - Adjusted confirm/route.ts -> verify on-chain first, delete last
+- Added nextjs tests.
+- Deleted CDKeyEncryption.ts component. No longer needed, the encryption is handled elsewhere.
+
 Notes:
 
 - This type of learning suits me the best (vibe coding). I have ideas in my head and no years of expertise. I can't learn for the sake of learning I hit a wall (because there is so much to know), get quickly demotivated and lose my goal by learning bloat that I may or may not use for my project ideas. With vibe coding I do, then fill up the gaps of knowledge by understanding how the pieces connect and how they work; step by step.

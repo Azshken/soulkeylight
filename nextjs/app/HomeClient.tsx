@@ -776,6 +776,7 @@ const Home: NextPage = () => {
         <Image
           src={selectedProduct.image_cid}
           alt=""
+
           fill
           className="object-cover scale-110 blur-2xl opacity-25"
           unoptimized
@@ -805,6 +806,7 @@ const Home: NextPage = () => {
                       <Image
                         src={product.image_cid}
                         alt={product.name}
+                        loading="eager"
                         fill
                         sizes="192px"
                         className="object-cover object-center"

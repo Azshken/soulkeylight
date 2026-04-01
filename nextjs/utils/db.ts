@@ -309,19 +309,29 @@ export async function confirmRedemption(params: {
   blockNumber: bigint;
 }): Promise<void> {
   // Only saves the redemption record — does NOT touch encryptedkey
-  await sql`
+  const result = await sql`
     UPDATE redemptions
-    SET redeemedby        = ${params.redeemedBy},
-        redeemedat        = NOW(),
-        redemptiontxhash  = ${params.redemptionTxHash},
-        blocknumber       = ${params.blockNumber.toString()}
-    WHERE cdkeyid = ${params.cdkeyId}
+    SET redeemed_by        = ${params.redeemedBy},
+        redeemed_at        = NOW(),
+        redemption_tx_hash  = ${params.redemptionTxHash},
+        block_number       = ${params.blockNumber.toString()}
+    WHERE cdkey_id = ${params.cdkeyId}
   `;
+  
+  // If 0 rows updated, the partial record from /api/redeem
+  // doesn't exist. Throw so the confirm route fails BEFORE clearEncryptedKey
+  // runs, keeping the AES key intact for recovery.
+  if (result.rowCount === 0) {
+    throw new Error(
+      `confirmRedemption: no partial redemption record found for cdkeyId ${params.cdkeyId}. ` +
+      `POST /api/redeem must complete successfully before confirm is called.`
+    );
+  }
 }
 
 // Called explicitly as the very last step in confirm/route.ts
 export async function clearEncryptedKey(cdkeyId: number): Promise<void> {
-  await sql`UPDATE cdkeys SET encryptedkey = NULL WHERE id = ${cdkeyId}`;
+  await sql`UPDATE cd_keys SET encrypted_key = NULL WHERE id = ${cdkeyId}`;
 }
 
 // ============ Reserve release helper ============

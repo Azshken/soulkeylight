@@ -48,4 +48,10 @@
 
 - Automatic generate-keys was changed to a manual import-keys
 - Fixed duplicate key entries in database
-- Fixed phantom duplicate counting 
+- Fixed phantom duplicate counting
+
+31/03/26
+
+- Fixed the failed on-chain claim TX deleted a CD key in databas
+- Added nextjs tests
+- Deleted CDKeyEncryption.ts component it was an relic from previous implementations
