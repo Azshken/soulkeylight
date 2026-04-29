@@ -10,6 +10,7 @@ nextjs/node_modules/
 nextjs/.env.local
 
 # General
+.env
 .DS_Store
 *.log
 node_modules
