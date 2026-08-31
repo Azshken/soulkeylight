@@ -1,0 +1,103 @@
+-- SoulKey Neon / Postgres schema
+-- Reconstructed 2026-08-31 from soulkeylight + docs.
+--
+-- Rules:
+--   * Exact snake_case WITH underscores in almost every query.
+--   * Addresses stored lowercase. Checksum with viem getAddress() before RPC.
+--   * cd_keys.encrypted_key is RETAINED after claim (v2 migration). Do not NULL it.
+--   * mints.token_id is NOT globally unique. Scope is per game.
+--   * Refunded keys re-enter the pool (availability queries check refunds).
+--   * Never DELETE cd_keys rows.
+--
+-- Code mismatches to fix later:
+--   1. register-game/route.ts INSERTs/ON CONFLICTs contractaddress (no underscore).
+--   2. reserveAndMint() does NOT write mints.contract_address yet.
+--   3. get-commitment does not yet filter products.is_active.
+
+CREATE TABLE IF NOT EXISTS products (
+  product_id          SERIAL PRIMARY KEY,
+  contract_address    VARCHAR(42) UNIQUE NOT NULL,
+  name                VARCHAR,
+  genre               VARCHAR,
+  description         TEXT,
+  image_cid           TEXT,
+  metadata_cid        TEXT,
+  image_claimed_cid   TEXT,
+  is_active           BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS batches (
+  batch_id    SERIAL PRIMARY KEY,
+  product_id  INTEGER NOT NULL REFERENCES products(product_id),
+  created_at  TIMESTAMP DEFAULT NOW(),
+  notes       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cd_keys (
+  id               SERIAL PRIMARY KEY,
+  batch_id         INTEGER NOT NULL REFERENCES batches(batch_id),
+  encrypted_key    TEXT,
+  commitment_hash  VARCHAR(64) NOT NULL,
+  reserved_by      VARCHAR(42),
+  created_at       TIMESTAMP DEFAULT NOW(),
+  CONSTRAINT cd_keys_commitment_hash_key UNIQUE (commitment_hash)
+);
+
+CREATE TABLE IF NOT EXISTS mints (
+  mint_id          SERIAL PRIMARY KEY,
+  cdkey_id         INTEGER UNIQUE NOT NULL REFERENCES cd_keys(id),
+  contract_address VARCHAR(42),
+  token_id         BIGINT NOT NULL,
+  minted_by        VARCHAR(42),
+  minted_at        TIMESTAMP,
+  mint_tx_hash     VARCHAR(66) UNIQUE,
+  block_number     BIGINT,
+  payment_token    VARCHAR(42) NOT NULL,
+  payment_amount   NUMERIC(36) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS redemptions (
+  redemption_id           SERIAL PRIMARY KEY,
+  cdkey_id                INTEGER UNIQUE NOT NULL REFERENCES cd_keys(id),
+  wallet_encrypted_cdkey  TEXT,
+  redeemed_by             VARCHAR(42),
+  redeemed_at             TIMESTAMP,
+  redemption_tx_hash      VARCHAR(66) UNIQUE,
+  block_number            BIGINT,
+  frozen_metadata_cid     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS refunds (
+  refund_id        SERIAL PRIMARY KEY,
+  cdkey_id         INTEGER UNIQUE NOT NULL REFERENCES cd_keys(id),
+  refunded_by      VARCHAR(42),
+  refunded_at      TIMESTAMP,
+  refund_reason    TEXT,
+  refund_tx_hash   VARCHAR(66) UNIQUE,
+  block_number     BIGINT,
+  payment_token    VARCHAR(42) NOT NULL,
+  refunded_amount  NUMERIC(36) NOT NULL,
+  fee_retained     NUMERIC(36) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reserve_releases (
+  release_id      SERIAL PRIMARY KEY,
+  cdkey_id        INTEGER NOT NULL REFERENCES cd_keys(id),
+  release_reason  VARCHAR(20) NOT NULL CHECK (release_reason IN ('claim', 'expiry')),
+  released_at     TIMESTAMP DEFAULT NOW(),
+  tx_hash         VARCHAR(66) UNIQUE,
+  block_number    BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS idx_products_is_active ON products (is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_batches_product_id ON batches (product_id);
+CREATE INDEX IF NOT EXISTS idx_cd_keys_batch_id ON cd_keys (batch_id);
+CREATE INDEX IF NOT EXISTS idx_cd_keys_created_at ON cd_keys (created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_cd_keys_batch_created ON cd_keys (batch_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_cd_keys_reserved_by ON cd_keys (reserved_by) WHERE reserved_by IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mints_token_id ON mints (token_id);
+CREATE INDEX IF NOT EXISTS idx_mints_minted_by ON mints (minted_by);
+CREATE INDEX IF NOT EXISTS idx_mints_cdkey_id ON mints (cdkey_id);
+CREATE INDEX IF NOT EXISTS idx_refunds_cdkey_id ON refunds (cdkey_id);
+CREATE INDEX IF NOT EXISTS idx_reserve_releases_cdkey_id ON reserve_releases (cdkey_id);
+CREATE INDEX IF NOT EXISTS idx_reserve_releases_release_reason ON reserve_releases (release_reason);
