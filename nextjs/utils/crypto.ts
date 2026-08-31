@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// packages/nextjs/utils/crypto.ts
+// nextjs/utils/crypto.ts
 import crypto from "crypto";
+import { x25519 } from "@noble/curves/ed25519";
 
-import { encrypt as ethEncrypt } from "@metamask/eth-sig-util";
+import {
+  deriveAesKeyFromSharedSecret,
+  hexToExactBytes,
+  parseX25519Ciphertext,
+  x25519SharedSecret,
+} from "./x25519";
 
 const ENCRYPTION_KEY = Buffer.from(
   process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString("hex"),
@@ -18,6 +24,7 @@ export function hashCDKey(cdkey: string): string {
   return crypto.createHash("sha256").update(cdkey).digest("hex");
 }
 
+/** AES-256-CBC for Neon cd_keys.encrypted_key. Do not change wire format. */
 export function encrypt(text: string): string {
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv("aes-256-cbc", ENCRYPTION_KEY, iv);
@@ -35,16 +42,30 @@ export function decrypt(encryptedData: string): string {
   return decrypted;
 }
 
-export function encryptWithPublicKey(data: string, publicKey: string): string {
-  // Using MetaMask's encryption standard for Ethereum public keys
+/**
+ * On-chain v1 ciphertext: ephPk(32) | nonce(12) | aesCt | tag(16)
+ * Returns 0x-prefixed hex for claimCdKey(bytes).
+ */
+export function encryptWithX25519(plaintext: string, userX25519PublicKeyHex: string): string {
+  const userPk = hexToExactBytes(userX25519PublicKeyHex, 32);
+  const ephSk = x25519.utils.randomPrivateKey();
+  const ephPk = x25519.getPublicKey(ephSk);
+  const sharedSecret = x25519SharedSecret(ephSk, userPk);
+  const aesKey = deriveAesKeyFromSharedSecret(sharedSecret);
 
-  // Encrypt using x25519-xsalsa20-poly1305 (MetaMask's encryption standard)
-  const encrypted = ethEncrypt({
-    publicKey: publicKey, // MetaMask encryption public key (not the wallet address)
-    data: data,
-    version: "x25519-xsalsa20-poly1305",
-  });
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(aesKey), nonce);
+  const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `0x${Buffer.concat([Buffer.from(ephPk), nonce, ct, tag]).toString("hex")}`;
+}
 
-  // Convert to hex string for easy transmission
-  return Buffer.from(JSON.stringify(encrypted), "utf8").toString("hex");
+export function decryptWithX25519(ciphertextHex: string, userX25519SecretKeyHex: string): string {
+  const { ephPk, nonce, ct, tag } = parseX25519Ciphertext(ciphertextHex);
+  const userSk = hexToExactBytes(userX25519SecretKeyHex, 32);
+  const sharedSecret = x25519SharedSecret(userSk, ephPk);
+  const aesKey = deriveAesKeyFromSharedSecret(sharedSecret);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", Buffer.from(aesKey), nonce);
+  decipher.setAuthTag(Buffer.from(tag));
+  return Buffer.concat([decipher.update(Buffer.from(ct)), decipher.final()]).toString("utf8");
 }
