@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createPublicClient, http, parseAbi } from "viem";
 
 import { sepolia } from "viem/chains";
-import { decrypt, encryptWithPublicKey } from "@/utils/crypto";
+import { decrypt, encryptWithX25519 } from "@/utils/crypto";
 import { createRedemptionRecord, getCDKeyByTokenId } from "@/utils/db";
 
 export async function POST(req: NextRequest) {
@@ -16,10 +16,19 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
 
-    const { tokenId, userAddress, userPublicKey, contractAddress } = body;
-    if (!tokenId || !userAddress || !userPublicKey) {
+    const { tokenId, userAddress, x25519PublicKey, userPublicKey, contractAddress } = body;
+    const userPk = x25519PublicKey ?? userPublicKey;
+    if (!tokenId || !userAddress || !userPk) {
       return NextResponse.json(
         { success: false, error: "Missing required fields" },
+        { status: 400 },
+      );
+    }
+
+    const pkHex = String(userPk).replace(/^0x/, "");
+    if (!/^[0-9a-fA-F]{64}$/.test(pkHex)) {
+      return NextResponse.json(
+        { success: false, error: "x25519PublicKey must be 32 bytes (64 hex chars)" },
         { status: 400 },
       );
     }
@@ -42,7 +51,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Verify NFT ownership on-chain
     const publicClient = createPublicClient({
       chain: sepolia,
       transport: http(rpcUrl),
@@ -62,7 +70,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Fetch cd_key + existing redemption record from new schema
     const cdkeyRecord = await getCDKeyByTokenId(
       BigInt(tokenId),
       contractAddress,
@@ -74,7 +81,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. If already re-encrypted for user (redemption record exists), return it
     if (cdkeyRecord.wallet_encrypted_cdkey) {
       return NextResponse.json({
         success: true,
@@ -85,7 +91,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // encrypted_key may already be nulled if previously processed — guard here
     if (!cdkeyRecord.encrypted_key) {
       return NextResponse.json(
         { success: false, error: "CD key already redeemed — check on-chain" },
@@ -93,16 +98,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 4. Decrypt server-side key (only ever happens once)
     const plaintextCDKey = decrypt(cdkeyRecord.encrypted_key);
-
-    // 5. Re-encrypt with user's MetaMask public key
-    const encryptedForUser = encryptWithPublicKey(
-      plaintextCDKey,
-      userPublicKey,
-    );
-
-    // 6. Store in redemptions table (partial — confirmed after on-chain tx)
+    const encryptedForUser = encryptWithX25519(plaintextCDKey, pkHex);
     await createRedemptionRecord(cdkeyRecord.id, encryptedForUser);
 
     return NextResponse.json({

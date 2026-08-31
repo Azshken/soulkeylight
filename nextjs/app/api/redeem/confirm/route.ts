@@ -5,7 +5,7 @@ import { sql } from '@vercel/postgres';
 import { createPublicClient, http, getAddress } from 'viem';
 import { sepolia } from 'viem/chains';
 import { SOULKEY_ABI } from '@/utils/abis';
-import { confirmRedemption, recordReserveRelease, clearEncryptedKey } from '@/utils/db';
+import { confirmRedemption, recordReserveRelease } from '@/utils/db';
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,20 +21,15 @@ export async function POST(req: NextRequest) {
 
     const publicClient = createPublicClient({ chain: sepolia, transport: http(rpcUrl) });
 
-    // ── STEP 1: Verify the tx succeeded on-chain ──────────────────────────────
-    // Do NOT trust client-provided status. Fetch the receipt ourselves.
     const receipt = await publicClient.getTransactionReceipt({ hash: txHash as `0x${string}` });
 
     if (!receipt || receipt.status !== 'success') {
-      // tx reverted or not yet mined — key stays in DB, user can retry
       return NextResponse.json(
         { success: false, error: 'Transaction not confirmed or reverted on-chain. Key is safe — please retry.' },
         { status: 400 }
       );
     }
 
-    // ── STEP 2: Confirm the NFT is actually soulbound on-chain ────────────────
-    // Guards against edge cases where a receipt arrives but the claim didn't stick.
     const claimTimestamp = await publicClient.readContract({
       address: getAddress(contractAddress),
       abi: SOULKEY_ABI,
@@ -49,9 +44,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── STEP 3: Finalise redemption record ────────────────────────────────────
-    // Key is confirmed on-chain. Safe to write the DB redemption record.
-    // encryptedkey is NOT touched yet.
     await confirmRedemption({
       cdkeyId: Number(cdkeyId),
       redeemedBy: userAddress,
@@ -59,7 +51,6 @@ export async function POST(req: NextRequest) {
       blockNumber: BigInt(blockNumber),
     });
 
-    // ── STEP 4: Pinata frozen metadata upload (non-fatal) ─────────────────────
     const productResult = await sql`
       SELECT p.name, p.genre, p.description, p.image_claimed_cid
       FROM products p
@@ -110,7 +101,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── STEP 5: Record reserve release ────────────────────────────────────────
     await recordReserveRelease({
       cdkeyId: Number(cdkeyId),
       releaseReason: 'claim',
@@ -118,11 +108,7 @@ export async function POST(req: NextRequest) {
       blockNumber: BigInt(blockNumber),
     });
 
-    // ── STEP 6: Delete the server-side AES key — LAST, after everything ───────
-    // Only reached if all prior steps succeeded. Key is confirmed on-chain.
-    // Even if this step somehow fails, the user can still decrypt via Reveal CD Key
-    // (which reads getEncryptedCDKey directly from the contract).
-    await clearEncryptedKey(Number(cdkeyId));
+    // AES copy in cd_keys.encrypted_key is RETAINED for the v2 hybrid migration.
 
     return NextResponse.json({ success: true });
   } catch (error: any) {
