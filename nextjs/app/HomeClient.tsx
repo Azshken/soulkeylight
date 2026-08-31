@@ -7,6 +7,13 @@ import Image from "next/image";
 import type { NextPage } from "next";
 import { decodeEventLog, formatEther } from "viem";
 import {
+  decryptX25519WebCrypto,
+  deriveX25519SecretFromSignature,
+  encryptionSignMessage,
+  toUnprefixedHex,
+  x25519PublicFromSecret,
+} from "@/utils/x25519";
+import {
   useAccount,
   usePublicClient,
   useReadContract,
@@ -67,6 +74,7 @@ const Home: NextPage = () => {
   const { address: connectedAddress } = useAccount();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
+  const x25519KeypairRef = useRef<{ sk: Uint8Array; pk: Uint8Array } | null>(null);
 
   // ─── Products ──────────────────────────────────────────────────────────────
 
@@ -301,6 +309,11 @@ const Home: NextPage = () => {
   // Reset UI-only state on game or token switch.
   // Data state is managed by wagmi hooks and fetchOwnedTokens — not reset here.
   useEffect(() => {
+    x25519KeypairRef.current = null;
+    setRevealedKey("");
+  }, [connectedAddress]);
+
+  useEffect(() => {
     setRevealedKey("");
     setShowRefundInput(false);
   }, [libraryContractAddress]);
@@ -469,6 +482,24 @@ const Home: NextPage = () => {
 
   // ─── Claim CD Key ─────────────────────────────────────────────────────────
 
+
+  const deriveX25519Keypair = async (walletAddress: string) => {
+    if (x25519KeypairRef.current) return x25519KeypairRef.current;
+    const ethereum = (window as any).ethereum;
+    if (!ethereum?.request) {
+      throw new Error("No injected wallet found");
+    }
+    const sig: string = await ethereum.request({
+      method: "personal_sign",
+      params: [encryptionSignMessage(walletAddress), walletAddress],
+    });
+    const sk = deriveX25519SecretFromSignature(sig);
+    const pk = x25519PublicFromSecret(sk);
+    const pair = { sk, pk };
+    x25519KeypairRef.current = pair;
+    return pair;
+  };
+
   const handleClaimCDKey = async () => {
     if (
       !connectedAddress ||
@@ -488,12 +519,10 @@ const Home: NextPage = () => {
     }
 
     setLoading(true);
-    setMintingStep("Requesting encryption public key from MetaMask...");
+    setMintingStep("Deriving encryption key from wallet...");
     try {
-      const userPublicKey = await (window as any).ethereum.request({
-        method: "eth_getEncryptionPublicKey",
-        params: [connectedAddress],
-      });
+      const { pk } = await deriveX25519Keypair(connectedAddress);
+      const x25519PublicKey = toUnprefixedHex(pk);
 
       setMintingStep("Retrieving and encrypting CD key...");
       const redeemRes = await fetch("/api/redeem", {
@@ -502,8 +531,8 @@ const Home: NextPage = () => {
         body: JSON.stringify({
           tokenId: selectedLibraryTokenId,
           userAddress: connectedAddress,
-          userPublicKey,
-          contractAddress,
+          x25519PublicKey,
+          contractAddress: libraryContractAddress,
         }),
       });
       const redeemData = await redeemRes.json();
@@ -517,8 +546,8 @@ const Home: NextPage = () => {
         functionName: "claimCdKey",
         args: [
           BigInt(selectedLibraryTokenId),
-          toBytes32(redeemData.commitmentHash), // bytes32 — fixed length ✓
-          toHexBytes(redeemData.encryptedCDKey), // bytes   — variable length ✓
+          toBytes32(redeemData.commitmentHash),
+          toHexBytes(redeemData.encryptedCDKey),
         ],
       });
 
@@ -527,9 +556,10 @@ const Home: NextPage = () => {
         hash: txHash,
       });
 
-      // Guard against reverted transactions
-      if (receipt.status !== 'success') {
-        throw new Error('claimCdKey transaction reverted. Your key is safe — please try again.');
+      if (receipt.status !== "success") {
+        throw new Error(
+          "claimCdKey transaction reverted. Your key is safe — please try again.",
+        );
       }
 
       setMintingStep("Confirming redemption...");
@@ -559,8 +589,6 @@ const Home: NextPage = () => {
       setMintingStep("");
     }
   };
-
-  // ─── Reveal CD Key ────────────────────────────────────────────────────────
 
   const handleRevealCDKey = async () => {
     if (
@@ -595,11 +623,9 @@ const Home: NextPage = () => {
         throw new Error("No encrypted CD key found on-chain");
       }
 
-      setMintingStep("Decrypting with your MetaMask private key...");
-      const decrypted = await (window as any).ethereum.request({
-        method: "eth_decrypt",
-        params: [encryptedBytes, connectedAddress],
-      });
+      setMintingStep("Decrypting with your wallet key...");
+      const { sk } = await deriveX25519Keypair(connectedAddress);
+      const decrypted = await decryptX25519WebCrypto(encryptedBytes, sk);
       setRevealedKey(decrypted);
       toast.success("CD key revealed successfully!");
     } catch (error: any) {
@@ -610,8 +636,6 @@ const Home: NextPage = () => {
       setMintingStep("");
     }
   };
-
-  // ─── Refund ───────────────────────────────────────────────────────────────
 
   const handleRefund = async () => {
     if (
@@ -1009,12 +1033,12 @@ const Home: NextPage = () => {
                     {
                       icon: "🔑",
                       title: "Claim your key",
-                      sub: "Encrypted with MetaMask, NFT becomes soulbound",
+                      sub: "Encrypted to your wallet, NFT becomes soulbound",
                     },
                     {
                       icon: "👁️",
                       title: "Reveal anytime",
-                      sub: "Decrypt locally with your MetaMask key",
+                      sub: "Decrypt locally with a wallet signature",
                     },
                     {
                       icon: "↩️",
