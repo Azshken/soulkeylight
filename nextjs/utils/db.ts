@@ -28,6 +28,14 @@ export interface MintParams {
   paymentAmount: string;
 }
 
+/**
+ * Held vs available (one mint row + one refund row per cdkey_id):
+ *   confirmed redemption (redemption_tx_hash set) → permanently held
+ *   mint exists and refunded_at < minted_at (or no refund) → held
+ *   no mint, or refunded_at >= minted_at → available (unclaimed refund returns to pool)
+ * Remint / re-refund OVERWRITE the existing row. History is on-chain.
+ */
+
 // ============ Product / Batch helpers ============
 
 /**
@@ -74,6 +82,7 @@ export async function insertCDKeys(
     await sql`
       INSERT INTO cd_keys (batch_id, encrypted_key, commitment_hash, created_at)
       VALUES (${batchId}, ${key.encrypted_key}, ${key.commitment_hash}, NOW())
+      ON CONFLICT (commitment_hash) DO NOTHING
     `;
   }
 }
@@ -81,7 +90,7 @@ export async function insertCDKeys(
 // ============ Mint helpers ============
 
 /**
- * Returns a cd_key that has no mint record yet, scoped to a specific product
+ * Returns a cd_key that is not currently held, scoped to an active product
  * (identified by contract_address). Uses SKIP LOCKED for concurrent safety.
  */
 export async function reserveCDKeyForWallet(
@@ -92,18 +101,22 @@ export async function reserveCDKeyForWallet(
   try {
     await client.sql`BEGIN`;
 
-    // Same wallet always gets its existing reservation back
+    // Same wallet always gets its existing reservation back if that key is still free
     const existing = await client.sql`
       SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
       FROM cd_keys ck
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
+      LEFT JOIN mints m ON m.cdkey_id = ck.id
+      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
+      LEFT JOIN redemptions r ON r.cdkey_id = ck.id
       WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
+        AND p.is_active = TRUE
         AND LOWER(ck.reserved_by) = LOWER(${walletAddress})
-        AND NOT EXISTS (
-          SELECT 1 FROM mints m
-          WHERE m.cdkey_id = ck.id
-          AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.cdkey_id = ck.id)
+        AND r.redemption_tx_hash IS NULL
+        AND (
+          m.mint_id IS NULL
+          OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
         )
       LIMIT 1
     `;
@@ -113,16 +126,23 @@ export async function reserveCDKeyForWallet(
       return existing.rows[0] as CDKeyRow;
     }
 
-    // New wallet — grab next unreserved, unminted key
+    // New reservation — next unreserved, unheld key on an active product
     const result = await client.sql`
       SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
       FROM cd_keys ck
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
+      LEFT JOIN mints m ON m.cdkey_id = ck.id
+      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
+      LEFT JOIN redemptions r ON r.cdkey_id = ck.id
       WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
-        AND NOT EXISTS (SELECT 1 FROM mints m WHERE m.cdkey_id = ck.id)
-        AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.cdkey_id = ck.id)
+        AND p.is_active = TRUE
         AND ck.reserved_by IS NULL
+        AND r.redemption_tx_hash IS NULL
+        AND (
+          m.mint_id IS NULL
+          OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
+        )
       ORDER BY ck.created_at ASC
       LIMIT 1
       FOR UPDATE OF ck SKIP LOCKED
@@ -157,46 +177,55 @@ export async function getAvailableKeyCount(
     FROM cd_keys ck
     JOIN batches b ON b.batch_id = ck.batch_id
     JOIN products p ON p.product_id = b.product_id
+    LEFT JOIN mints m ON m.cdkey_id = ck.id
+    LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
+    LEFT JOIN redemptions r ON r.cdkey_id = ck.id
     WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
-      AND NOT EXISTS (
-        SELECT 1 FROM mints m
-        WHERE m.cdkey_id = ck.id
-        AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.cdkey_id = ck.id)
+      AND p.is_active = TRUE
+      AND ck.reserved_by IS NULL
+      AND r.redemption_tx_hash IS NULL
+      AND (
+        m.mint_id IS NULL
+        OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
       )
   `;
   return Number(result.rows[0].cnt);
 }
 
-// atomic reserve + mint record
 /**
- * Atomically reserves a cd_key and inserts the mint record in a single
- * transaction. FOR UPDATE SKIP LOCKED inside the transaction holds the row
- * lock until COMMIT, preventing double-assignment under concurrent load.
+ * Atomically locks the committed key and upserts the mint record.
+ * Remint of an unclaimed refunded key OVERWRITES the existing mints row
+ * (new token_id / tx). Confirmed claims are rejected.
  */
 export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
   const client: VercelPoolClient = await db.connect();
   try {
     await client.sql`BEGIN`;
 
-    // Strip 0x prefix — cd_keys stores hashes without it
-    const normalizedHash = params.commitmentHash.replace(/^0x/i, "");
+    const normalizedHash = params.commitmentHash.replace(/^0x/i, "").toLowerCase();
+    const prefixedHash = `0x${normalizedHash}`;
 
-    // Lock the SPECIFIC key that was committed to on-chain at mint time
     const keyResult = await client.sql`
       SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
       FROM cd_keys ck
-      WHERE ck.commitment_hash = ${normalizedHash}
-        AND NOT EXISTS (
-          SELECT 1 FROM mints m
-          WHERE m.cdkey_id = ck.id
-          AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.cdkey_id = ck.id)
+      JOIN batches b ON b.batch_id = ck.batch_id
+      JOIN products p ON p.product_id = b.product_id
+      LEFT JOIN mints m ON m.cdkey_id = ck.id
+      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
+      LEFT JOIN redemptions r ON r.cdkey_id = ck.id
+      WHERE LOWER(ck.commitment_hash) IN (${normalizedHash}, ${prefixedHash})
+        AND LOWER(p.contract_address) = LOWER(${params.contractAddress})
+        AND r.redemption_tx_hash IS NULL
+        AND (
+          m.mint_id IS NULL
+          OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
         )
       FOR UPDATE OF ck SKIP LOCKED
     `;
 
     if (!keyResult.rows[0]) {
       await client.sql`ROLLBACK`;
-      throw new Error("CD key no longer available — may already be minted");
+      throw new Error("CD key no longer available — may already be minted or claimed");
     }
 
     const key = keyResult.rows[0] as CDKeyRow;
@@ -215,9 +244,23 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
         ${params.paymentToken},
         ${params.paymentAmount}
       )
+      ON CONFLICT (cdkey_id) DO UPDATE SET
+        token_id       = EXCLUDED.token_id,
+        minted_by      = EXCLUDED.minted_by,
+        minted_at      = NOW(),
+        mint_tx_hash   = EXCLUDED.mint_tx_hash,
+        block_number   = EXCLUDED.block_number,
+        payment_token  = EXCLUDED.payment_token,
+        payment_amount = EXCLUDED.payment_amount
     `;
 
-    // Clear the wallet reservation — key is now permanently assigned
+    // Drop a leftover partial redemption from a previous unconfirmed claim attempt
+    await client.sql`
+      DELETE FROM redemptions
+      WHERE cdkey_id = ${key.id}
+        AND redemption_tx_hash IS NULL
+    `;
+
     await client.sql`
       UPDATE cd_keys SET reserved_by = NULL WHERE id = ${key.id}
     `;
@@ -237,6 +280,7 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
 /**
  * Fetches a cd_key row plus its current redemption record (if any)
  * by joining through mints → cd_keys → redemptions.
+ * Ignores a mint row whose current refund is newer (old token was burned).
  */
 export async function getCDKeyByTokenId(
   tokenId: bigint,
@@ -256,8 +300,10 @@ export async function getCDKeyByTokenId(
     JOIN batches b ON b.batch_id = ck.batch_id
     JOIN products p ON p.product_id = b.product_id
     LEFT JOIN redemptions r ON r.cdkey_id = ck.id
+    LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
     WHERE m.token_id = ${tokenId.toString()}
-    AND LOWER(p.contract_address) = LOWER(${contractAddress})
+      AND LOWER(p.contract_address) = LOWER(${contractAddress})
+      AND (rf.refund_id IS NULL OR m.minted_at > rf.refunded_at)
     LIMIT 1
   `;
   return (result.rows[0] as CDKeyWithRedemption) ?? null;
@@ -269,9 +315,8 @@ export async function filterExistingHashes(
 ): Promise<Set<string>> {
   if (hashes.length === 0) return new Set();
 
-  
-  // Build explicit OR chain — avoids ANY() array parameter issues with @vercel/postgres
-  const placeholders = hashes.map((h) => `'${h}'`).join(", ");
+  // Build explicit IN list — avoids ANY() array parameter issues with @vercel/postgres
+  const placeholders = hashes.map((h) => `'${h.replace(/'/g, "''")}'`).join(", ");
   const result = await sql.query(
     `SELECT commitment_hash FROM cd_keys WHERE commitment_hash IN (${placeholders})`,
   );
@@ -299,39 +344,30 @@ export async function createRedemptionRecord(
 
 /**
  * Finalises the redemption record after claimCdKey tx confirms on-chain.
- * Also deletes the server-side encrypted_key — it is no longer needed.
  */
-// Two separate, explicit functions
 export async function confirmRedemption(params: {
   cdkeyId: number;
   redeemedBy: string;
   redemptionTxHash: string;
   blockNumber: bigint;
 }): Promise<void> {
-  // Only saves the redemption record — does NOT touch encryptedkey
   const result = await sql`
     UPDATE redemptions
-    SET redeemed_by        = ${params.redeemedBy},
-        redeemed_at        = NOW(),
+    SET redeemed_by         = ${params.redeemedBy},
+        redeemed_at         = NOW(),
         redemption_tx_hash  = ${params.redemptionTxHash},
-        block_number       = ${params.blockNumber.toString()}
+        block_number        = ${params.blockNumber.toString()}
     WHERE cdkey_id = ${params.cdkeyId}
   `;
-  
+
   // If 0 rows updated, the partial record from /api/redeem
-  // doesn't exist. Throw so the confirm route fails BEFORE clearEncryptedKey
-  // runs, keeping the AES key intact for recovery.
+  // doesn't exist. Throw so the confirm route fails without inventing a row.
   if (result.rowCount === 0) {
     throw new Error(
       `confirmRedemption: no partial redemption record found for cdkeyId ${params.cdkeyId}. ` +
       `POST /api/redeem must complete successfully before confirm is called.`
     );
   }
-}
-
-// Called explicitly as the very last step in confirm/route.ts
-export async function clearEncryptedKey(cdkeyId: number): Promise<void> {
-  await sql`UPDATE cd_keys SET encrypted_key = NULL WHERE id = ${cdkeyId}`;
 }
 
 // ============ Reserve release helper ============
@@ -351,6 +387,11 @@ export async function recordReserveRelease(params: {
 
 // ============ Refund helper ============
 
+/**
+ * Records a refund by overwriting the single refunds row for this key.
+ * A later remint writes a newer minted_at so the key is held again until
+ * this row is overwritten with a still-newer refunded_at.
+ */
 export async function recordRefund(params: {
   cdkeyId: number;
   refundedBy: string;
@@ -376,6 +417,14 @@ export async function recordRefund(params: {
       ${params.refundedAmount},
       ${params.feeRetained}
     )
-    ON CONFLICT (cdkey_id) DO NOTHING
+    ON CONFLICT (cdkey_id) DO UPDATE SET
+      refunded_by      = EXCLUDED.refunded_by,
+      refunded_at      = NOW(),
+      refund_reason    = EXCLUDED.refund_reason,
+      refund_tx_hash   = EXCLUDED.refund_tx_hash,
+      block_number     = EXCLUDED.block_number,
+      payment_token    = EXCLUDED.payment_token,
+      refunded_amount  = EXCLUDED.refunded_amount,
+      fee_retained     = EXCLUDED.fee_retained
   `;
 }
