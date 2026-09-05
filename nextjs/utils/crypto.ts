@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // nextjs/utils/crypto.ts
 import crypto from "crypto";
-import { x25519 } from "@noble/curves/ed25519";
+import { x25519 } from "@noble/curves/ed25519.js";
 
 import {
   deriveAesKeyFromSharedSecret,
@@ -48,8 +48,9 @@ export function decrypt(encryptedData: string): string {
  */
 export function encryptWithX25519(plaintext: string, userX25519PublicKeyHex: string): string {
   const userPk = hexToExactBytes(userX25519PublicKeyHex, 32);
-  const ephSk = x25519.utils.randomPrivateKey();
-  const ephPk = x25519.getPublicKey(ephSk);
+  const eph = x25519.keygen();
+  const ephSk = eph.secretKey;
+  const ephPk = eph.publicKey;
   const sharedSecret = x25519SharedSecret(ephSk, userPk);
   const aesKey = deriveAesKeyFromSharedSecret(sharedSecret);
 
