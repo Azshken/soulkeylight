@@ -38,10 +38,6 @@ export interface MintParams {
 
 // ============ Product / Batch helpers ============
 
-/**
- * Looks up product_id by contract address. Creates a placeholder product row
- * if none exists — used on first key generation for a new SoulKey contract.
- */
 export async function getOrCreateProduct(
   contractAddress: string,
   name = "Unknown Game",
@@ -89,10 +85,6 @@ export async function insertCDKeys(
 
 // ============ Mint helpers ============
 
-/**
- * Returns a cd_key that is not currently held, scoped to an active product
- * (identified by contract_address). Uses SKIP LOCKED for concurrent safety.
- */
 export async function reserveCDKeyForWallet(
   contractAddress: string,
   walletAddress: string,
@@ -101,7 +93,6 @@ export async function reserveCDKeyForWallet(
   try {
     await client.sql`BEGIN`;
 
-    // Same wallet always gets its existing reservation back if that key is still free
     const existing = await client.sql`
       SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
       FROM cd_keys ck
@@ -126,7 +117,6 @@ export async function reserveCDKeyForWallet(
       return existing.rows[0] as CDKeyRow;
     }
 
-    // New reservation — next unreserved, unheld key on an active product
     const result = await client.sql`
       SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
       FROM cd_keys ck
@@ -192,15 +182,23 @@ export async function getAvailableKeyCount(
   return Number(result.rows[0].cnt);
 }
 
-/**
- * Atomically locks the committed key and upserts the mint record.
- * Remint of an unclaimed refunded key OVERWRITES the existing mints row
- * (new token_id / tx). Confirmed claims are rejected.
- */
 export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
   const client: VercelPoolClient = await db.connect();
   try {
     await client.sql`BEGIN`;
+
+    // Retry after on-chain success: same tx is already linked.
+    const alreadyLinked = await client.sql`
+      SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
+      FROM mints m
+      JOIN cd_keys ck ON ck.id = m.cdkey_id
+      WHERE LOWER(m.mint_tx_hash) = LOWER(${params.mintTxHash})
+      LIMIT 1
+    `;
+    if (alreadyLinked.rows[0]) {
+      await client.sql`COMMIT`;
+      return alreadyLinked.rows[0] as CDKeyRow;
+    }
 
     const normalizedHash = params.commitmentHash.replace(/^0x/i, "").toLowerCase();
     const prefixedHash = `0x${normalizedHash}`;
@@ -225,7 +223,10 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
 
     if (!keyResult.rows[0]) {
       await client.sql`ROLLBACK`;
-      throw new Error("CD key no longer available — may already be minted or claimed");
+      throw new Error(
+        "CD key no longer available — may already be minted or claimed. " +
+          "If the chain tx succeeded, this token was not written to the DB.",
+      );
     }
 
     const key = keyResult.rows[0] as CDKeyRow;
@@ -254,7 +255,6 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
         payment_amount = EXCLUDED.payment_amount
     `;
 
-    // Drop a leftover partial redemption from a previous unconfirmed claim attempt
     await client.sql`
       DELETE FROM redemptions
       WHERE cdkey_id = ${key.id}
@@ -275,13 +275,6 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
   }
 }
 
-// ============ Redeem helpers ============
-
-/**
- * Fetches a cd_key row plus its current redemption record (if any)
- * by joining through mints → cd_keys → redemptions.
- * Ignores a mint row whose current refund is newer (old token was burned).
- */
 export async function getCDKeyByTokenId(
   tokenId: bigint,
   contractAddress: string,
@@ -309,13 +302,11 @@ export async function getCDKeyByTokenId(
   return (result.rows[0] as CDKeyWithRedemption) ?? null;
 }
 
-// Returns the set of hashes that already exist in the DB
 export async function filterExistingHashes(
   hashes: string[],
 ): Promise<Set<string>> {
   if (hashes.length === 0) return new Set();
 
-  // Build explicit IN list — avoids ANY() array parameter issues with @vercel/postgres
   const placeholders = hashes.map((h) => `'${h.replace(/'/g, "''")}'`).join(", ");
   const result = await sql.query(
     `SELECT commitment_hash FROM cd_keys WHERE commitment_hash IN (${placeholders})`,
@@ -323,11 +314,6 @@ export async function filterExistingHashes(
   return new Set(result.rows.map((r) => r.commitment_hash as string));
 }
 
-/**
- * Creates an initial redemption record when the server re-encrypts the key
- * for the user — before the on-chain claimCdKey tx is sent.
- * redeemed_by / tx data are filled in by confirmRedemption().
- */
 export async function createRedemptionRecord(
   cdkeyId: number,
   walletEncryptedCdkey: string,
@@ -342,9 +328,6 @@ export async function createRedemptionRecord(
   return result.rows[0].redemption_id as number;
 }
 
-/**
- * Finalises the redemption record after claimCdKey tx confirms on-chain.
- */
 export async function confirmRedemption(params: {
   cdkeyId: number;
   redeemedBy: string;
@@ -360,8 +343,6 @@ export async function confirmRedemption(params: {
     WHERE cdkey_id = ${params.cdkeyId}
   `;
 
-  // If 0 rows updated, the partial record from /api/redeem
-  // doesn't exist. Throw so the confirm route fails without inventing a row.
   if (result.rowCount === 0) {
     throw new Error(
       `confirmRedemption: no partial redemption record found for cdkeyId ${params.cdkeyId}. ` +
@@ -369,8 +350,6 @@ export async function confirmRedemption(params: {
     );
   }
 }
-
-// ============ Reserve release helper ============
 
 export async function recordReserveRelease(params: {
   cdkeyId: number;
@@ -385,13 +364,6 @@ export async function recordReserveRelease(params: {
   `;
 }
 
-// ============ Refund helper ============
-
-/**
- * Records a refund by overwriting the single refunds row for this key.
- * A later remint writes a newer minted_at so the key is held again until
- * this row is overwritten with a still-newer refunded_at.
- */
 export async function recordRefund(params: {
   cdkeyId: number;
   refundedBy: string;
