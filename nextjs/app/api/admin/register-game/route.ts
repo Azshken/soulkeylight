@@ -54,7 +54,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // ── Verify game is registered in the vault ────────────────────────────
+    // ── Verify game is registered in the vault ────────────────────
     const vaultAddress = await publicClient.readContract({
       address: contractAddress as `0x${string}`,
       abi: parseAbi(["function vault() view returns (address)"]),
@@ -78,7 +78,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // ── Fetch game metadata from Pinata ───────────────────────────────────
+    // ── Fetch game metadata from Pinata ───────────────────────
     const gateways = [
       `https://gateway.pinata.cloud/ipfs/${metadataCid}`,
       `https://ipfs.io/ipfs/${metadataCid}`,
@@ -108,14 +108,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const description = meta.description ?? "";
     const genre = findAttr("Genre");
 
-    // ── Upsert product row ────────────────────────────────────────────────
+    // ── Upsert product row ────────────────────────────
     await sql`
-      INSERT INTO products (contractaddress, name, genre, description, image_cid, metadata_cid)
+      INSERT INTO products (contract_address, name, genre, description, image_cid, metadata_cid)
       VALUES (${contractAddress.toLowerCase()}, ${gameName}, ${genre}, ${description}, ${imageCid}, ${metadataCid})
-      ON CONFLICT (contractaddress) DO UPDATE SET
-        name        = EXCLUDED.name,
-        genre       = EXCLUDED.genre,
-        description = EXCLUDED.description,
+      ON CONFLICT (contract_address) DO UPDATE SET
+        name         = EXCLUDED.name,
+        genre        = EXCLUDED.genre,
+        description  = EXCLUDED.description,
         image_cid    = EXCLUDED.image_cid,
         metadata_cid = EXCLUDED.metadata_cid,
         is_active    = true
