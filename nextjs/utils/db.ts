@@ -2,24 +2,28 @@
 // packages/nextjs/utils/db.ts
 import { db, sql, type VercelPoolClient } from "@vercel/postgres";
 
+// Wallet cancel / close MetaMask leaves reserved_by set. 15 minutes covers a
+// slow confirm + link-token without parking a key forever.
+export const RESERVATION_TTL_SQL = "15 minutes";
+
 // ============ Types ============
 
 export interface CDKeyRow {
   id: number;
-  encrypted_key: string; // ← was encrypted_cdkey in old schema
+  encrypted_key: string;
   commitment_hash: string;
   batch_id: number;
   created_at: Date;
 }
 
 export interface CDKeyWithRedemption extends CDKeyRow {
-  wallet_encrypted_cdkey: string | null; // from redemptions table
+  wallet_encrypted_cdkey: string | null;
   redemption_id: number | null;
 }
 
 export interface MintParams {
   contractAddress: string;
-  commitmentHash: string; // used to look up the specific key
+  commitmentHash: string;
   tokenId: bigint;
   mintedBy: string;
   mintTxHash: string;
@@ -27,16 +31,6 @@ export interface MintParams {
   paymentToken: string;
   paymentAmount: string;
 }
-
-/**
- * Held vs available (one mint row + one refund row per cdkey_id):
- *   confirmed redemption (redemption_tx_hash set) → permanently held
- *   mint exists and refunded_at < minted_at (or no refund) → held
- *   no mint, or refunded_at >= minted_at → available (unclaimed refund returns to pool)
- * Remint / re-refund OVERWRITE the existing row. History is on-chain.
- */
-
-// ============ Product / Batch helpers ============
 
 export async function getOrCreateProduct(
   contractAddress: string,
@@ -83,8 +77,6 @@ export async function insertCDKeys(
   }
 }
 
-// ============ Mint helpers ============
-
 export async function reserveCDKeyForWallet(
   contractAddress: string,
   walletAddress: string,
@@ -92,6 +84,13 @@ export async function reserveCDKeyForWallet(
   const client: VercelPoolClient = await db.connect();
   try {
     await client.sql`BEGIN`;
+
+    await client.sql`
+      UPDATE cd_keys
+      SET reserved_by = NULL, reserved_at = NULL
+      WHERE reserved_by IS NOT NULL
+        AND (reserved_at IS NULL OR reserved_at < NOW() - INTERVAL '15 minutes')
+    `;
 
     const existing = await client.sql`
       SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
@@ -104,6 +103,7 @@ export async function reserveCDKeyForWallet(
       WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
         AND p.is_active = TRUE
         AND LOWER(ck.reserved_by) = LOWER(${walletAddress})
+        AND ck.reserved_at >= NOW() - INTERVAL '15 minutes'
         AND r.redemption_tx_hash IS NULL
         AND (
           m.mint_id IS NULL
@@ -146,7 +146,9 @@ export async function reserveCDKeyForWallet(
     const key = result.rows[0] as CDKeyRow;
 
     await client.sql`
-      UPDATE cd_keys SET reserved_by = ${walletAddress} WHERE id = ${key.id}
+      UPDATE cd_keys
+      SET reserved_by = ${walletAddress}, reserved_at = NOW()
+      WHERE id = ${key.id}
     `;
 
     await client.sql`COMMIT`;
@@ -172,7 +174,11 @@ export async function getAvailableKeyCount(
     LEFT JOIN redemptions r ON r.cdkey_id = ck.id
     WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
       AND p.is_active = TRUE
-      AND ck.reserved_by IS NULL
+      AND (
+        ck.reserved_by IS NULL
+        OR ck.reserved_at IS NULL
+        OR ck.reserved_at < NOW() - INTERVAL '15 minutes'
+      )
       AND r.redemption_tx_hash IS NULL
       AND (
         m.mint_id IS NULL
@@ -187,7 +193,6 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
   try {
     await client.sql`BEGIN`;
 
-    // Retry after on-chain success: same tx is already linked.
     const alreadyLinked = await client.sql`
       SELECT ck.id, ck.encrypted_key, ck.commitment_hash, ck.batch_id, ck.created_at
       FROM mints m
@@ -262,7 +267,9 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
     `;
 
     await client.sql`
-      UPDATE cd_keys SET reserved_by = NULL WHERE id = ${key.id}
+      UPDATE cd_keys
+      SET reserved_by = NULL, reserved_at = NULL
+      WHERE id = ${key.id}
     `;
 
     await client.sql`COMMIT`;
