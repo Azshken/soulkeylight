@@ -3,7 +3,7 @@
 //
 // Returns token IDs minted by a given wallet for a given SoulKey contract.
 // Tracks original minter only — tokens become soulbound after claim so transfers are rare.
-// Refunded (burned) tokens are excluded.
+// Currently refunded (burned) tokens are excluded. A remint after refund shows the new token_id.
 // Contract is validated against the products table to prevent enumeration of arbitrary addresses.
 //
 // Rate limiting: in-memory, best-effort per Vercel warm instance (1 req/2s per IP).
@@ -99,11 +99,10 @@ export async function GET(req: NextRequest) {
       JOIN cd_keys  ck ON ck.id       = m.cdkey_id
       JOIN batches b  ON b.batch_id   = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
+      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
       WHERE LOWER(m.minted_by)        = LOWER(${wallet})
         AND LOWER(p.contract_address) = LOWER(${contract})
-        AND NOT EXISTS (
-          SELECT 1 FROM refunds r WHERE r.cdkey_id = ck.id
-        )
+        AND (rf.refund_id IS NULL OR m.minted_at > rf.refunded_at)
       ORDER BY m.token_id ASC
     `;
 

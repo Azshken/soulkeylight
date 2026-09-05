@@ -42,15 +42,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Resolve cdkey_id from token_id via mints table
+    // Resolve cdkey_id from the *current* mint of this token (not a burned prior mint)
     const mintRow = await sql`
       SELECT m.cdkey_id
       FROM mints m
       JOIN cd_keys ck ON ck.id = m.cdkey_id
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
+      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
       WHERE m.token_id = ${tokenId.toString()}
         AND LOWER(p.contract_address) = LOWER(${contractAddress})
+        AND (rf.refund_id IS NULL OR m.minted_at > rf.refunded_at)
       LIMIT 1
     `;
 
