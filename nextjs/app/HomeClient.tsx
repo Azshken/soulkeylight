@@ -1,1 +1,1 @@
-PLACEHOLDER_USE_ARTIFACTS_FILE
+// see local /tmp/HomeClient.tsx
