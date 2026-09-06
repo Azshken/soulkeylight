@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// packages/nextjs/utils/db.ts
 import { db, sql, type VercelPoolClient } from "@vercel/postgres";
 
 export const RESERVATION_TTL_SQL = "15 minutes";
@@ -94,7 +93,6 @@ export async function reserveCDKeyForWallet(
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
       LEFT JOIN mints m ON m.cdkey_id = ck.id
-      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
       LEFT JOIN redemptions r ON r.cdkey_id = ck.id
       WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
         AND p.is_active = TRUE
@@ -103,7 +101,11 @@ export async function reserveCDKeyForWallet(
         AND r.redemption_tx_hash IS NULL
         AND (
           m.mint_id IS NULL
-          OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
+          OR EXISTS (
+            SELECT 1 FROM refunds rf
+            WHERE rf.cdkey_id = ck.id
+              AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp)
+          )
         )
       LIMIT 1
     `;
@@ -119,7 +121,6 @@ export async function reserveCDKeyForWallet(
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
       LEFT JOIN mints m ON m.cdkey_id = ck.id
-      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
       LEFT JOIN redemptions r ON r.cdkey_id = ck.id
       WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
         AND p.is_active = TRUE
@@ -127,7 +128,11 @@ export async function reserveCDKeyForWallet(
         AND r.redemption_tx_hash IS NULL
         AND (
           m.mint_id IS NULL
-          OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
+          OR EXISTS (
+            SELECT 1 FROM refunds rf
+            WHERE rf.cdkey_id = ck.id
+              AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp)
+          )
         )
       ORDER BY ck.created_at ASC
       LIMIT 1
@@ -166,7 +171,6 @@ export async function getAvailableKeyCount(
     JOIN batches b ON b.batch_id = ck.batch_id
     JOIN products p ON p.product_id = b.product_id
     LEFT JOIN mints m ON m.cdkey_id = ck.id
-    LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
     LEFT JOIN redemptions r ON r.cdkey_id = ck.id
     WHERE LOWER(p.contract_address) = LOWER(${contractAddress})
       AND p.is_active = TRUE
@@ -178,7 +182,11 @@ export async function getAvailableKeyCount(
       AND r.redemption_tx_hash IS NULL
       AND (
         m.mint_id IS NULL
-        OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
+        OR EXISTS (
+          SELECT 1 FROM refunds rf
+          WHERE rf.cdkey_id = ck.id
+            AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp)
+        )
       )
   `;
   return Number(result.rows[0].cnt);
@@ -210,14 +218,17 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
       LEFT JOIN mints m ON m.cdkey_id = ck.id
-      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
       LEFT JOIN redemptions r ON r.cdkey_id = ck.id
       WHERE LOWER(ck.commitment_hash) IN (${normalizedHash}, ${prefixedHash})
         AND LOWER(p.contract_address) = LOWER(${params.contractAddress})
         AND r.redemption_tx_hash IS NULL
         AND (
           m.mint_id IS NULL
-          OR (rf.refund_id IS NOT NULL AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp))
+          OR EXISTS (
+            SELECT 1 FROM refunds rf
+            WHERE rf.cdkey_id = ck.id
+              AND rf.refunded_at >= COALESCE(m.minted_at, '-infinity'::timestamp)
+          )
         )
       FOR UPDATE OF ck SKIP LOCKED
     `;
@@ -255,9 +266,6 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
         payment_token  = EXCLUDED.payment_token,
         payment_amount = EXCLUDED.payment_amount
     `;
-
-    // Remint is a live token again. Prior refund is history on-chain only.
-    await client.sql`DELETE FROM refunds WHERE cdkey_id = ${key.id}`;
 
     await client.sql`
       DELETE FROM redemptions
@@ -299,10 +307,13 @@ export async function getCDKeyByTokenId(
     JOIN batches b ON b.batch_id = ck.batch_id
     JOIN products p ON p.product_id = b.product_id
     LEFT JOIN redemptions r ON r.cdkey_id = ck.id
-    LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
     WHERE m.token_id = ${tokenId.toString()}
       AND LOWER(p.contract_address) = LOWER(${contractAddress})
-      AND (rf.refund_id IS NULL OR m.minted_at > rf.refunded_at)
+      AND NOT EXISTS (
+        SELECT 1 FROM refunds rf
+        WHERE rf.cdkey_id = ck.id
+          AND rf.refunded_at >= m.minted_at
+      )
     LIMIT 1
   `;
   return (result.rows[0] as CDKeyWithRedemption) ?? null;
@@ -372,6 +383,7 @@ export async function recordReserveRelease(params: {
 
 export async function recordRefund(params: {
   cdkeyId: number;
+  tokenId?: string;
   refundedBy: string;
   refundReason: string;
   refundTxHash: string;
@@ -380,14 +392,13 @@ export async function recordRefund(params: {
   refundedAmount: string;
   feeRetained: string;
 }): Promise<void> {
-  // One row per key. Delete+insert so SERIAL refund_id advances (re-refund after remint).
-  await sql`DELETE FROM refunds WHERE cdkey_id = ${params.cdkeyId}`;
   await sql`
     INSERT INTO refunds (
-      cdkey_id, refunded_by, refunded_at, refund_reason,
+      cdkey_id, token_id, refunded_by, refunded_at, refund_reason,
       refund_tx_hash, block_number, payment_token, refunded_amount, fee_retained
     ) VALUES (
       ${params.cdkeyId},
+      ${params.tokenId ?? null},
       ${params.refundedBy},
       NOW(),
       ${params.refundReason},
@@ -397,5 +408,6 @@ export async function recordRefund(params: {
       ${params.refundedAmount},
       ${params.feeRetained}
     )
+    ON CONFLICT (refund_tx_hash) DO NOTHING
   `;
 }
