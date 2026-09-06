@@ -25,13 +25,6 @@ interface IMasterKeyVault {
     function getUSDC() external view returns (address);
 }
 
-/**
- * @title SoulKey - Per-Game CD-Key NFT Contract
- * @notice Deploy one instance per game. Payments flow directly to MasterKeyVault.
- *         This contract holds no funds. MasterKeyVault is the sole financial authority.
- * @dev tokenURI returns baseURI + tokenId so each encrypted CD-key NFT has
- *      unique metadata served by the backend.
- */
 contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
     using Strings for uint256;
@@ -158,7 +151,8 @@ contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function _validateCommitment(bytes32 cdCommitmentHash) private view {
-        if (nextTokenId > maxSupply) revert MaxSupplyReached();
+        // Cap live tokens, not lifetime mint events. Refund burn frees a slot.
+        if (totalSupply() >= maxSupply) revert MaxSupplyReached();
         if (cdCommitmentHash == bytes32(0)) revert InvalidCommitmentHash();
         if (commitmentInUse[cdCommitmentHash]) revert CommitmentAlreadyUsed();
     }
@@ -287,7 +281,7 @@ contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
 
     function setMaxSupply(uint64 newMaxSupply) external onlyOwner {
         require(
-            newMaxSupply >= nextTokenId - 1,
+            newMaxSupply >= totalSupply(),
             "Cannot set below current supply"
         );
         uint64 oldSupply = maxSupply;
@@ -295,7 +289,7 @@ contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
         emit MaxSupplyUpdated(oldSupply, newMaxSupply);
     }
 
-    function totalSupply() external view returns (uint256) {
+    function totalSupply() public view returns (uint256) {
         return nextTokenId - 1 - _burnedCount;
     }
 
