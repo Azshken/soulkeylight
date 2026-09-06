@@ -20,9 +20,12 @@ export async function GET(req: NextRequest) {
       JOIN cd_keys ck ON ck.id = m.cdkey_id
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
-      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
       WHERE LOWER(m.minted_by) = LOWER(${wallet})
-        AND (rf.refund_id IS NULL OR m.minted_at > rf.refunded_at)
+        AND NOT EXISTS (
+          SELECT 1 FROM refunds rf
+          WHERE rf.cdkey_id = ck.id
+            AND rf.refunded_at >= m.minted_at
+        )
       GROUP BY p.product_id
       ORDER BY p.name ASC
     `;

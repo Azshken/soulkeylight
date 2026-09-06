@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// packages/nextjs/app/api/refund/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
 
@@ -42,17 +41,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Resolve cdkey_id from the *current* mint of this token (not a burned prior mint)
     const mintRow = await sql`
       SELECT m.cdkey_id
       FROM mints m
       JOIN cd_keys ck ON ck.id = m.cdkey_id
       JOIN batches b ON b.batch_id = ck.batch_id
       JOIN products p ON p.product_id = b.product_id
-      LEFT JOIN refunds rf ON rf.cdkey_id = ck.id
       WHERE m.token_id = ${tokenId.toString()}
         AND LOWER(p.contract_address) = LOWER(${contractAddress})
-        AND (rf.refund_id IS NULL OR m.minted_at > rf.refunded_at)
+        AND NOT EXISTS (
+          SELECT 1 FROM refunds rf
+          WHERE rf.cdkey_id = ck.id
+            AND rf.refunded_at >= m.minted_at
+        )
       LIMIT 1
     `;
 
@@ -67,6 +68,7 @@ export async function POST(req: NextRequest) {
 
     await recordRefund({
       cdkeyId,
+      tokenId: String(tokenId),
       refundedBy,
       refundReason: refundReason || "",
       refundTxHash,
