@@ -2,11 +2,7 @@
 // packages/nextjs/utils/db.ts
 import { db, sql, type VercelPoolClient } from "@vercel/postgres";
 
-// Wallet cancel / close MetaMask leaves reserved_by set. 15 minutes covers a
-// slow confirm + link-token without parking a key forever.
 export const RESERVATION_TTL_SQL = "15 minutes";
-
-// ============ Types ============
 
 export interface CDKeyRow {
   id: number;
@@ -260,6 +256,9 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
         payment_amount = EXCLUDED.payment_amount
     `;
 
+    // Remint is a live token again. Prior refund is history on-chain only.
+    await client.sql`DELETE FROM refunds WHERE cdkey_id = ${key.id}`;
+
     await client.sql`
       DELETE FROM redemptions
       WHERE cdkey_id = ${key.id}
@@ -381,6 +380,8 @@ export async function recordRefund(params: {
   refundedAmount: string;
   feeRetained: string;
 }): Promise<void> {
+  // One row per key. Delete+insert so SERIAL refund_id advances (re-refund after remint).
+  await sql`DELETE FROM refunds WHERE cdkey_id = ${params.cdkeyId}`;
   await sql`
     INSERT INTO refunds (
       cdkey_id, refunded_by, refunded_at, refund_reason,
@@ -396,14 +397,5 @@ export async function recordRefund(params: {
       ${params.refundedAmount},
       ${params.feeRetained}
     )
-    ON CONFLICT (cdkey_id) DO UPDATE SET
-      refunded_by      = EXCLUDED.refunded_by,
-      refunded_at      = NOW(),
-      refund_reason    = EXCLUDED.refund_reason,
-      refund_tx_hash   = EXCLUDED.refund_tx_hash,
-      block_number     = EXCLUDED.block_number,
-      payment_token    = EXCLUDED.payment_token,
-      refunded_amount  = EXCLUDED.refunded_amount,
-      fee_retained     = EXCLUDED.fee_retained
   `;
 }
