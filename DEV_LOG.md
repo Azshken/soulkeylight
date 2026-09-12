@@ -239,7 +239,7 @@ Refactoring the code:
 06/09/26
 
 - DB refunded cdkeys are now mintable again.
-- Soulkey.sol, totalSupply >= maxSupply -> refunds no longer block maxSupply. Refunds reduce totalSupply
+- Soulkey.sol, totalSupply >= maxSupply -> refunds no longer block maxSupply. Refunds reduce totalSupply.
 
 12/09/26
 
