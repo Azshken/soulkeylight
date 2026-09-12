@@ -98,6 +98,24 @@ rotate without this.
 **Note:** Rotation is distinct from the v2 encryption upgrade. This script addresses AES key
 compromise; v2 addresses the on-chain scheme upgrade.
 
+### Local dev environment: lint and production build broken (pre-existing)
+**Status:** Reproduces at a clean checkout of `main` — not caused by application code.
+- `pnpm lint` (nextjs): eslint-config-next cannot resolve `next/dist/compiled/babel/eslint-parser`
+  (broken peer link in the root-level pnpm store).
+- `pnpm build` (nextjs): `Module not found: Can't resolve '@x402/core/client'` (and siblings) —
+  optional deps of `@coinbase/cdp-sdk`, pulled in via RainbowKit → wagmi connectors →
+  `@base-org/account`. Trace runs through `admin/AdminClient.tsx`.
+**Root cause candidate:** deps are installed into an untracked root workspace
+(`pnpm-lock.yaml` / `pnpm-workspace.yaml` at repo root, not committed; `nextjs/` has no
+committed lockfile). A clean `pnpm install` inside `nextjs/` (and committing that lockfile)
+should fix both. Vercel deploys install independently — verify the deployed build still works.
+**Update (12/09, later same day):** the root store was pruned to the root package's two deps
+(`@openzeppelin/contracts`, `solidity-bytes-utils`); nextjs's top-level symlinks into it are now
+dangling, so local `pnpm test` / `pnpm build` / `pnpm lint` cannot run at all until the chore
+above is done. The root `pnpm-lock.yaml` / `pnpm-workspace.yaml` session leftovers were deleted
+(and gitignored). Last verified green: 63/63 tests + clean `tsc --noEmit` against the exact
+`feat/pending-tx-resume` tree before the prune.
+
 ---
 
 ## 🟢 Low Priority / Polish
@@ -118,6 +136,14 @@ is no longer active on the storefront (e.g. greyed out name, "Delisted" badge).
 Currently set via direct SQL in Neon console. Should be an optional field in the admin
 register/re-register form.
 **Files:** `nextjs/app/admin/AdminClient.tsx`, `nextjs/app/api/admin/register-game/route.ts`
+
+### Stale references in docs/skills/*
+- `SKILL_FRONTEND.md` still documents the pre-v1 MetaMask encryption scheme
+  (`eth_getEncryptionPublicKey` / `eth_decrypt`, `CDKeyEncryption.tsx` — component deleted
+  31/03/26); v1 is personal_sign + HKDF + X25519 (`utils/x25519.ts`). Rewrite deliberately
+  deferred — out of scope for the refresh-resume work (12/09/26).
+- `SKILL_API_DB.md` points at `skills/references/GOTCHAS.md`, which never existed; bug history
+  now lives in `docs/GOTCHAS.md` (stub) and the skills' own gotcha sections.
 
 ---
 
@@ -201,6 +227,13 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
 
 ## Recently Resolved
 
+- ✅ In-flight mint/claim/refund survive a page refresh — sessionStorage pending-tx record
+  (`utils/pendingTx.ts`) + resume-on-load effect in HomeClient completes the missing DB write
+  from the tx receipt; `/api/refund` made idempotent on refund_tx_hash; reverted refunds are no
+  longer recorded in the DB (was: 0-amount refund row hid a live token) (12/09/26)
+- ✅ Claim-flow test baseline fixed — personal_sign mock is a real 65-byte signature (was 33
+  bytes; 4 tests failing); new `HomeClient.resume.test.tsx` covers the resume lifecycle;
+  suite is 63 tests / 7 files (12/09/26)
 - ✅ Encryption architecture decision finalised — v1 uses X25519 (personal_sign + HKDF);
   v2 upgrades to hybrid X25519 + ML-KEM-768 post-audit; AES copy retained post-claim as migration
   enabler; clearEncryptedKey removed from v1 confirm flow (28/04/26)

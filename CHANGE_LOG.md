@@ -60,3 +60,14 @@
 
 - Changed viem.verifyMessage to SIWE
 - Added tests
+
+12/09/26
+
+- In-flight mint/claim/refund txs now survive a page refresh:
+  - utils/pendingTx.ts (sessionStorage) record saved the moment the wallet returns a txHash; cleared only after the server DB write succeeds
+  - HomeClient resume-on-load effect finishes link-token / redeem-confirm / refund from the tx receipt
+  - /api/refund made idempotent on refund_tx_hash so resume retries are safe
+- Fixed: a reverted refund tx is no longer recorded in the DB (previously wrote a 0-amount refund row and hid a live token)
+- Fixed: reverted mint tx now reports a clear error instead of "Could not extract token ID"
+- Fixed: claim-flow test mock now returns a real 65-byte personal_sign signature (was 33 bytes — 4 tests failing at baseline); CLAUDE.md example corrected
+- Added __tests__/HomeClient.resume.test.tsx — 11 tests (record lifecycle, resume per kind, wallet mismatch, revert, timeout). Suite: 63 tests / 7 files

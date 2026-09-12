@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import type { NextPage } from "next";
 import { decodeEventLog, formatEther } from "viem";
+import type { Log } from "viem";
 import {
   decryptX25519WebCrypto,
   deriveX25519SecretFromSignature,
@@ -23,6 +24,11 @@ import {
 
 import { SOULKEY_ABI, VAULT_ABI } from "../utils/abis";
 import { toBytes32, toHexBytes } from '@/utils/helpers';
+import {
+  clearPendingTx,
+  loadPendingTx,
+  savePendingTx,
+} from "@/utils/pendingTx";
 import { toast } from "sonner";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -68,6 +74,69 @@ type PaymentRecord = readonly [
   `0x${string}`,
 ];
 
+// Receipt-wait cap for the refresh-resume path only. A dropped or replaced tx
+// would otherwise hold the UI in a loading state forever; on timeout the
+// pending record is kept and retried at the next page load.
+const RESUME_RECEIPT_TIMEOUT_MS = 90_000;
+
+// ─── Receipt decoders ─────────────────────────────────────────────────────────
+// Shared by the live handlers and the refresh-resume effect so both rebuild
+// identical link-token / refund payloads from the same receipt logs.
+
+function decodeMintLogs(logs: readonly Log[]): {
+  tokenId: bigint | undefined;
+  paymentToken: string;
+} {
+  let tokenId: bigint | undefined;
+  let paymentToken: string = ZERO_ADDRESS;
+  for (const log of logs) {
+    try {
+      const d = decodeEventLog({
+        abi: SOULKEY_ABI,
+        eventName: "Transfer",
+        data: log.data,
+        topics: log.topics,
+      });
+      if (d.args.from === ZERO_ADDRESS) tokenId = d.args.tokenId;
+    } catch {}
+    try {
+      const d = decodeEventLog({
+        abi: SOULKEY_ABI,
+        eventName: "NFTMinted",
+        data: log.data,
+        topics: log.topics,
+      });
+      paymentToken = d.args.paymentToken as string;
+    } catch {}
+  }
+  return { tokenId, paymentToken };
+}
+
+function decodeRefundLogs(logs: readonly Log[]): {
+  refundedAmount: string;
+  feeRetained: string;
+  paymentToken: string;
+} {
+  let refundedAmount = "0";
+  let feeRetained = "0";
+  let paymentToken: string = ZERO_ADDRESS;
+  for (const log of logs) {
+    try {
+      const decoded = decodeEventLog({
+        abi: VAULT_ABI,
+        eventName: "RefundIssued",
+        data: log.data,
+        topics: log.topics,
+      });
+      refundedAmount = (decoded.args as any).refundedAmount.toString();
+      feeRetained = (decoded.args as any).feeRetained.toString();
+      paymentToken = (decoded.args as any).paymentToken as string;
+      break;
+    } catch {}
+  }
+  return { refundedAmount, feeRetained, paymentToken };
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const Home: NextPage = () => {
@@ -75,6 +144,14 @@ const Home: NextPage = () => {
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
   const x25519KeypairRef = useRef<{ sk: Uint8Array; pk: Uint8Array } | null>(null);
+
+  // True while a wallet-driven flow (mint/claim/refund or a resume) is awaiting
+  // in this tab. The refresh-resume effect skips while set, so it never races
+  // the live handler that owns the current pending record.
+  const flowActiveRef = useRef(false);
+  // txHash of the pending record this mount already tried to resume — effect
+  // re-runs (dep changes, StrictMode double-mount) must not start a second one.
+  const resumeAttemptedRef = useRef<string | null>(null);
 
   // ─── Products ──────────────────────────────────────────────────────────────
 
@@ -342,6 +419,14 @@ const Home: NextPage = () => {
       return;
     }
 
+    // Captured before the write: the on-chain price reads could refresh
+    // mid-flow, and both the DB record and the pending-tx record must reflect
+    // what this tx actually pays.
+    const paymentAmount = (
+      selectedPayment === "ETH" ? mintPriceETH : mintPriceUSD
+    ).toString();
+
+    flowActiveRef.current = true;
     setLoading(true);
     setMintingStep("Getting commitment hash from database...");
     try {
@@ -393,34 +478,36 @@ const Home: NextPage = () => {
         });
       }
 
+      // Persist BEFORE awaiting the receipt: a refresh from this point until
+      // the link-token write completes is recovered on the next page load.
+      savePendingTx({
+        kind: "mint",
+        txHash,
+        wallet: connectedAddress,
+        contractAddress,
+        commitmentHash: commitData.commitmentHash,
+        payment: selectedPayment,
+        paymentAmount,
+      });
+
       setMintingStep("Waiting for transaction confirmation...");
       const receipt = await publicClient.waitForTransactionReceipt({
         hash: txHash,
       });
 
-      // Decode using SOULKEY_ABI — no inline parseAbi, consistent with abis.ts.
-      let tokenId: bigint | undefined;
-      let mintedPaymentToken: string = ZERO_ADDRESS;
-      for (const log of receipt.logs) {
-        try {
-          const d = decodeEventLog({
-            abi: SOULKEY_ABI,
-            eventName: "Transfer",
-            data: log.data,
-            topics: log.topics,
-          });
-          if (d.args.from === ZERO_ADDRESS) tokenId = d.args.tokenId;
-        } catch {}
-        try {
-          const d = decodeEventLog({
-            abi: SOULKEY_ABI,
-            eventName: "NFTMinted",
-            data: log.data,
-            topics: log.topics,
-          });
-          mintedPaymentToken = d.args.paymentToken as string;
-        } catch {}
+      // A reverted mint moved no funds and minted nothing — drop the pending
+      // record. The DB key reservation expires server-side after 15 minutes.
+      if (receipt.status !== "success") {
+        clearPendingTx();
+        throw new Error(
+          "Mint transaction reverted on-chain — no payment was taken. Please try again.",
+        );
       }
+
+      // Decode using SOULKEY_ABI — no inline parseAbi, consistent with abis.ts.
+      const { tokenId, paymentToken: mintedPaymentToken } = decodeMintLogs(
+        receipt.logs,
+      );
       if (!tokenId)
         throw new Error("Could not extract token ID from transaction");
       const mintedTokenId = tokenId; // const — type is bigint, never re-widened across awaits
@@ -435,10 +522,7 @@ const Home: NextPage = () => {
           txHash,
           blockNumber: receipt.blockNumber.toString(),
           paymentToken: mintedPaymentToken,
-          paymentAmount:
-            selectedPayment === "ETH"
-              ? mintPriceETH!.toString()
-              : mintPriceUSD!.toString(),
+          paymentAmount,
           contractAddress,
           commitmentHash: commitData.commitmentHash,
         }),
@@ -457,11 +541,15 @@ const Home: NextPage = () => {
         // exception to the no-optimistic-update policy.
         toast.warning(
           `NFT minted on-chain (tx: ${txHash.slice(0, 10)}…) but the server record failed ` +
-            `— please contact support with your transaction hash.`,
+            `— it will retry automatically on your next visit. If it persists, contact ` +
+            `support with your transaction hash.`,
         );
         await fetchLibrary();
         return;
       }
+
+      // Server record confirmed — the pending record has done its job.
+      clearPendingTx();
 
       // DB is now consistent — fetch authoritative state.
       // No optimistic update: avoids a race condition where a polling-triggered
@@ -475,6 +563,7 @@ const Home: NextPage = () => {
       console.error("Mint error", error);
       toast.error(`Failed to mint: ${error.message}`);
     } finally {
+      flowActiveRef.current = false;
       setLoading(false);
       setMintingStep("");
     }
@@ -518,6 +607,7 @@ const Home: NextPage = () => {
       return;
     }
 
+    flowActiveRef.current = true;
     setLoading(true);
     setMintingStep("Deriving encryption key from wallet...");
     try {
@@ -551,12 +641,25 @@ const Home: NextPage = () => {
         ],
       });
 
+      // Persist BEFORE awaiting the receipt — a refresh from here until the
+      // confirm write succeeds is recovered by the resume effect on next load.
+      savePendingTx({
+        kind: "claim",
+        txHash,
+        wallet: connectedAddress,
+        contractAddress: libraryContractAddress,
+        tokenId: selectedLibraryTokenId.toString(),
+        cdkeyId: Number(redeemData.cdkeyId),
+      });
+
       setMintingStep("Waiting for claim confirmation...");
       const receipt = await publicClient.waitForTransactionReceipt({
         hash: txHash,
       });
 
       if (receipt.status !== "success") {
+        // Definitively failed on-chain — nothing left for the resume path to finish.
+        clearPendingTx();
         throw new Error(
           "claimCdKey transaction reverted. Your key is safe — please try again.",
         );
@@ -564,7 +667,7 @@ const Home: NextPage = () => {
 
       setMintingStep("Confirming redemption...");
 
-      await fetch("/api/redeem/confirm", {
+      const confirmRes = await fetch("/api/redeem/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -576,6 +679,18 @@ const Home: NextPage = () => {
           tokenId: selectedLibraryTokenId.toString(),
         }),
       });
+      const confirmData = await confirmRes.json().catch(() => null);
+      if (confirmData?.success) {
+        // Server record complete — safe to drop the recovery record.
+        clearPendingTx();
+      } else {
+        // On-chain claim succeeded; only the server record is incomplete. Keep
+        // the pending record — the resume effect retries the (retry-safe)
+        // confirm endpoint on the next page load.
+        toast.warning(
+          "Claim confirmed on-chain, but the server record failed — it will retry automatically on your next visit.",
+        );
+      }
 
       await refetchClaimTimestamp();
       toast.success(
@@ -585,6 +700,7 @@ const Home: NextPage = () => {
       console.error("Claim error", error);
       toast.error(`Failed to claim: ${error.message}`);
     } finally {
+      flowActiveRef.current = false;
       setLoading(false);
       setMintingStep("");
     }
@@ -656,6 +772,7 @@ const Home: NextPage = () => {
       return;
     }
 
+    flowActiveRef.current = true;
     setLoading(true);
     setMintingStep("Processing refund on blockchain...");
     try {
@@ -667,30 +784,36 @@ const Home: NextPage = () => {
         args: [libraryContractAddress, BigInt(selectedLibraryTokenId), reason],
       });
 
+      // Persist BEFORE awaiting the receipt — a refresh from here until the
+      // refund is recorded in the DB is recovered on the next page load.
+      savePendingTx({
+        kind: "refund",
+        txHash,
+        wallet: connectedAddress,
+        contractAddress: libraryContractAddress,
+        tokenId: selectedLibraryTokenId.toString(),
+        refundReason: reason,
+      });
+
       setMintingStep("Waiting for refund confirmation...");
       const receipt = await publicClient.waitForTransactionReceipt({
         hash: txHash,
       });
 
-      let refundedAmount = "0",
-        feeRetained = "0",
-        paymentToken: string = ZERO_ADDRESS;
-      for (const log of receipt.logs) {
-        try {
-          const decoded = decodeEventLog({
-            abi: VAULT_ABI,
-            eventName: "RefundIssued",
-            data: log.data,
-            topics: log.topics,
-          });
-          refundedAmount = (decoded.args as any).refundedAmount.toString();
-          feeRetained = (decoded.args as any).feeRetained.toString();
-          paymentToken = (decoded.args as any).paymentToken as string;
-          break;
-        } catch {}
+      // A reverted refund burned nothing and paid nothing back. Recording it in
+      // the DB anyway would hide a still-live token from the user's library.
+      if (receipt.status !== "success") {
+        clearPendingTx();
+        throw new Error(
+          "Refund transaction reverted on-chain — no refund was issued and your NFT is untouched. Please try again.",
+        );
       }
 
-      await fetch("/api/refund", {
+      const { refundedAmount, feeRetained, paymentToken } = decodeRefundLogs(
+        receipt.logs,
+      );
+
+      const refundRes = await fetch("/api/refund", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -705,6 +828,17 @@ const Home: NextPage = () => {
           feeRetained,
         }),
       });
+      const refundData = await refundRes.json().catch(() => null);
+      if (refundData?.success) {
+        clearPendingTx();
+      } else {
+        // On-chain refund succeeded; only the DB record is incomplete. Keep the
+        // pending record — the resume effect retries the endpoint (idempotent
+        // on refund_tx_hash) on the next page load.
+        toast.warning(
+          "Refund confirmed on-chain, but the server record failed — it will retry automatically on your next visit.",
+        );
+      }
 
       // Fetch authoritative DB state — the refunds row now exists so token is excluded.
       await fetchLibrary();
@@ -715,10 +849,167 @@ const Home: NextPage = () => {
       console.error("Refund error", error);
       toast.error(`Refund failed: ${error.message}`);
     } finally {
+      flowActiveRef.current = false;
       setLoading(false);
       setMintingStep("");
     }
   };
+
+  // ─── Resume in-flight transactions after a refresh ────────────────────────
+  //
+  // Each write flow saves a PendingTx record in sessionStorage the moment the
+  // wallet returns a txHash, and clears it only after the server-side DB write
+  // succeeded. A refresh inside that window leaves the on-chain tx (and the
+  // user's payment) real but unknown to the DB. On mount, this effect looks for
+  // such a record and completes the DB step from the tx receipt.
+  //
+  // All three endpoints are retry-safe: link-token short-circuits on an
+  // existing mint_tx_hash, redeem/confirm re-runs deterministic updates, and
+  // /api/refund reports success for an already-recorded refund_tx_hash.
+  useEffect(() => {
+    if (!connectedAddress || !publicClient) return;
+    // A live handler in this tab owns the current record — never race it.
+    if (flowActiveRef.current) return;
+    const pending = loadPendingTx();
+    if (!pending) return;
+    // Only resume for the wallet that submitted the tx; finishing with another
+    // address would write wrong ownership into the DB. The record is kept so
+    // the original wallet can still resume it after reconnecting.
+    if (pending.wallet.toLowerCase() !== connectedAddress.toLowerCase()) return;
+    // Once per txHash per mount: effect re-runs (dep changes, StrictMode
+    // double-mount) must not start a second concurrent resume. A failed
+    // attempt is retried at the next page load instead.
+    if (resumeAttemptedRef.current === pending.txHash) return;
+    resumeAttemptedRef.current = pending.txHash;
+
+    (async () => {
+      flowActiveRef.current = true;
+      setLoading(true);
+      setMintingStep("Finishing your pending transaction...");
+      try {
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash: pending.txHash,
+          timeout: RESUME_RECEIPT_TIMEOUT_MS,
+        });
+
+        if (receipt.status !== "success") {
+          // Definitive on-chain failure — nothing left to finish, and the
+          // record must not linger through every future page load.
+          clearPendingTx();
+          toast.error(
+            `Your pending ${pending.kind} transaction reverted on-chain — please try again.`,
+          );
+          return;
+        }
+
+        if (pending.kind === "mint") {
+          const { tokenId, paymentToken } = decodeMintLogs(receipt.logs);
+          if (tokenId === undefined) {
+            // Receipt succeeded but the mint events could not be decoded —
+            // keep the record as evidence; support can resolve it by txHash.
+            toast.warning(
+              `Pending mint (tx: ${pending.txHash.slice(0, 10)}…) succeeded on-chain but could not be read — please contact support.`,
+            );
+            return;
+          }
+          setMintingStep("Linking token to database...");
+          const res = await fetch("/api/mint/link-token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              tokenId: tokenId.toString(),
+              walletAddress: pending.wallet,
+              txHash: pending.txHash,
+              blockNumber: receipt.blockNumber.toString(),
+              paymentToken,
+              paymentAmount: pending.paymentAmount,
+              contractAddress: pending.contractAddress,
+              commitmentHash: pending.commitmentHash,
+            }),
+          });
+          const data = await res.json().catch(() => null);
+          if (data?.success) {
+            clearPendingTx();
+            await fetchLibrary();
+            setSelectedLibraryTokenId(Number(tokenId));
+            toast.success(
+              `Pending mint recovered — token #${tokenId} is in your library.`,
+            );
+          } else {
+            toast.warning(
+              "Pending mint found, but the server record still failed — it will retry on your next visit. Contact support if this persists.",
+            );
+          }
+        } else if (pending.kind === "claim") {
+          setMintingStep("Confirming redemption...");
+          const res = await fetch("/api/redeem/confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              cdkeyId: pending.cdkeyId,
+              userAddress: pending.wallet,
+              txHash: pending.txHash,
+              blockNumber: receipt.blockNumber.toString(),
+              contractAddress: pending.contractAddress,
+              tokenId: pending.tokenId,
+            }),
+          });
+          const data = await res.json().catch(() => null);
+          if (data?.success) {
+            clearPendingTx();
+            await refetchClaimTimestamp();
+            toast.success(
+              "Pending claim recovered — your CD key is ready to reveal.",
+            );
+          } else {
+            toast.warning(
+              "Pending claim found, but the server confirmation still failed — it will retry on your next visit.",
+            );
+          }
+        } else {
+          const { refundedAmount, feeRetained, paymentToken } =
+            decodeRefundLogs(receipt.logs);
+          setMintingStep("Recording refund...");
+          const res = await fetch("/api/refund", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contractAddress: pending.contractAddress,
+              tokenId: pending.tokenId,
+              refundedBy: pending.wallet,
+              refundReason: pending.refundReason,
+              refundTxHash: pending.txHash,
+              blockNumber: receipt.blockNumber.toString(),
+              paymentToken,
+              refundedAmount,
+              feeRetained,
+            }),
+          });
+          const data = await res.json().catch(() => null);
+          if (data?.success) {
+            clearPendingTx();
+            await fetchLibrary();
+            toast.success("Pending refund recorded — your refund is complete.");
+          } else {
+            toast.warning(
+              "Pending refund found, but the server record still failed — it will retry on your next visit.",
+            );
+          }
+        }
+      } catch (error: any) {
+        // Receipt wait timed out or the RPC failed: the tx may still mine.
+        // Keep the record so the next page load retries.
+        console.error("Pending tx resume failed", error);
+        toast.warning(
+          `Could not finish your pending ${pending.kind} transaction — it will retry when you refresh.`,
+        );
+      } finally {
+        flowActiveRef.current = false;
+        setLoading(false);
+        setMintingStep("");
+      }
+    })();
+  }, [connectedAddress, publicClient, fetchLibrary, refetchClaimTimestamp]);
 
   // ─── Frontend render helpers ───────────────────────────────────────────────
 

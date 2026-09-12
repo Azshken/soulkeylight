@@ -41,6 +41,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Idempotent retry: a page refresh between the on-chain refund and the client
+    // clearing its pending-tx record re-POSTs this route with the same txHash.
+    // An existing refunds row means it was already recorded — return success.
+    // (The mint lookup below filters out refunded tokens by design, so without
+    // this guard a legitimate retry would 404 "No mint record found" forever.)
+    const existingRefund = await sql`
+      SELECT cdkey_id FROM refunds
+      WHERE LOWER(refund_tx_hash) = LOWER(${refundTxHash})
+      LIMIT 1
+    `;
+    if (existingRefund.rows[0]) {
+      return NextResponse.json({
+        success: true,
+        cdkeyId: existingRefund.rows[0].cdkey_id,
+        alreadyRecorded: true,
+      });
+    }
+
     const mintRow = await sql`
       SELECT m.cdkey_id
       FROM mints m

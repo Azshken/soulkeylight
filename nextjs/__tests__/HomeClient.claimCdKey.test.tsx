@@ -32,7 +32,9 @@ const MOCK_ADDRESS  = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266' as `0x${strin
 const MOCK_CONTRACT = '0x5FbDB2315678afecb367f032d93F642f64180aa3' as `0x${string}`;
 const MOCK_TX_HASH  = ('0x' + 'ab'.repeat(32)) as `0x${string}`;
 const MOCK_TOKEN_ID = 1;
-const MOCK_PERSONAL_SIGN = '0x' + 'ab'.repeat(32) + '01';
+// 65 bytes (r || s || v) - deriveX25519SecretFromSignature rejects anything else.
+// NOTE: 'ab'.repeat(32) + '01' is only 33 bytes; the HKDF IKM must be the full signature.
+const MOCK_PERSONAL_SIGN = '0x' + 'ab'.repeat(64) + '01';
 
 const MOCK_PRODUCT = {
   product_id:       1,

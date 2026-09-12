@@ -14,3 +14,10 @@ nextjs/.env.local
 .DS_Store
 *.log
 node_modules
+
+# Root pnpm session leftovers — the working install lives in the root store
+# (nextjs/ has no committed lockfile). Deleting these breaks script resolution,
+# so they stay on disk but out of git until the env chore (see docs/OPEN_ISSUES.md).
+/pnpm-lock.yaml
+/pnpm-workspace.yaml
+/HANDOFF.md
