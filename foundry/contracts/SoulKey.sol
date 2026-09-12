@@ -34,6 +34,10 @@ contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
     uint64 public maxSupply;
     uint64 private nextTokenId = 1;
     uint64 private _burnedCount;
+    // Tokens burned by the vault while still UNCLAIMED (refund burns). Each one
+    // frees a mint slot. Burns of claimed (soulbound) tokens never touch this —
+    // their slot stays consumed forever, matching commitmentInUse.
+    uint64 private _refundBurnedCount;
 
     string private _baseTokenURI;
     IMasterKeyVault public immutable vault;
@@ -151,8 +155,12 @@ contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function _validateCommitment(bytes32 cdCommitmentHash) private view {
-        // Cap live tokens, not lifetime mint events. Refund burn frees a slot.
-        if (totalSupply() >= maxSupply) revert MaxSupplyReached();
+        // Cap lifetime mints minus refund burns. totalSupply() is wrong here: it
+        // also subtracts claimed burns, but burning a soulbound token must NOT
+        // free a mint slot (its commitmentInUse entry stays set). Only unclaimed
+        // refund burns (_refundBurnedCount) give a slot back.
+        if (nextTokenId - 1 - _refundBurnedCount >= maxSupply)
+            revert MaxSupplyReached();
         if (cdCommitmentHash == bytes32(0)) revert InvalidCommitmentHash();
         if (commitmentInUse[cdCommitmentHash]) revert CommitmentAlreadyUsed();
     }
@@ -218,7 +226,10 @@ contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
         delete commitmentHash[tokenId];
         delete encryptedCdKey[tokenId];
         delete claimTimestamp[tokenId];
-        if (!wasSoulbound) delete commitmentInUse[hash];
+        if (!wasSoulbound) {
+            delete commitmentInUse[hash];
+            _refundBurnedCount++;
+        }
         emit NFTBurned(tokenId, tokenOwner, wasSoulbound);
     }
 
@@ -280,8 +291,9 @@ contract SoulKey is ERC721, ERC2981, Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     function setMaxSupply(uint64 newMaxSupply) external onlyOwner {
+        // Same figure as the mint gate: lifetime mints minus refund burns.
         require(
-            newMaxSupply >= totalSupply(),
+            newMaxSupply >= nextTokenId - 1 - _refundBurnedCount,
             "Cannot set below current supply"
         );
         uint64 oldSupply = maxSupply;

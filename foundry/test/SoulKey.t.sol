@@ -425,6 +425,93 @@ contract SoulKeyTest is Test {
         assertEq(soulKey.totalSupply(), 1);
     }
 
+    // ─────────────────────── Mint cap accounting ───────────────────────────
+    // The mint gate counts lifetime mints minus UNCLAIMED refund burns.
+    // Burning a claimed (soulbound) token — by user or by vault — does NOT
+    // free a slot; an unclaimed refund burn does (and clears commitmentInUse).
+
+    function _deploySmall(uint64 cap) internal returns (SoulKey smallKey) {
+        vm.prank(owner);
+        smallKey = new SoulKey(address(vault), "uri/", "Tiny", "TNY", cap);
+        vm.prank(owner);
+        vault.registerGame(address(smallKey));
+    }
+
+    function test_MintCap_ClaimedUserBurn_DoesNotFreeSlot() public {
+        SoulKey smallKey = _deploySmall(2);
+
+        vm.startPrank(user);
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-1"));
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-2"));
+        smallKey.claimCdKey(1, keccak256("cap-1"), abi.encodePacked("k"));
+        smallKey.burn(1); // claimed burn — slot stays consumed
+        vm.stopPrank();
+
+        // Old buggy gate used totalSupply() == 1 here and let this mint through.
+        vm.expectRevert(SoulKey.MaxSupplyReached.selector);
+        vm.prank(user);
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-3"));
+    }
+
+    function test_MintCap_UnclaimedRefundBurn_FreesSlot() public {
+        SoulKey smallKey = _deploySmall(2);
+
+        vm.startPrank(user);
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-1"));
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-2"));
+        vm.stopPrank();
+
+        // Vault burns an UNCLAIMED token (refund path): slot freed,
+        // commitment released for re-use by a future key.
+        vm.prank(address(vault));
+        smallKey.burnByVault(1);
+        assertFalse(smallKey.isCommitmentInUse(keccak256("cap-1")));
+
+        vm.prank(user);
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-3"));
+        assertEq(smallKey.ownerOf(3), user);
+    }
+
+    function test_MintCap_VaultBurnOfClaimed_DoesNotFreeSlot() public {
+        SoulKey smallKey = _deploySmall(1);
+
+        vm.startPrank(user);
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-1"));
+        smallKey.claimCdKey(1, keccak256("cap-1"), abi.encodePacked("k"));
+        vm.stopPrank();
+
+        // Post-claim refund via the vault: wasSoulbound == true → no slot freed,
+        // commitmentInUse stays set.
+        vm.prank(address(vault));
+        smallKey.burnByVault(1);
+        assertTrue(smallKey.isCommitmentInUse(keccak256("cap-1")));
+
+        vm.expectRevert(SoulKey.MaxSupplyReached.selector);
+        vm.prank(user);
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-2"));
+    }
+
+    function test_SetMaxSupply_CountsMintedMinusRefundBurns() public {
+        SoulKey smallKey = _deploySmall(5);
+
+        vm.startPrank(user);
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-1"));
+        smallKey.mintWithETH{value: MINT_PRICE_ETH}(keccak256("cap-2"));
+        vm.stopPrank();
+
+        vm.prank(address(vault));
+        smallKey.burnByVault(2); // unclaimed refund burn
+
+        // Gate figure = 2 lifetime mints - 1 refund burn = 1.
+        vm.prank(owner);
+        smallKey.setMaxSupply(1);
+        assertEq(smallKey.maxSupply(), 1);
+
+        vm.expectRevert("Cannot set below current supply");
+        vm.prank(owner);
+        smallKey.setMaxSupply(0);
+    }
+
     // ─────────────────────────────── Fuzz ────────────────────────────────────
 
     function testFuzz_MintWithETH_RevertsOnWrongValue(
