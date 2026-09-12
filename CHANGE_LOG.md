@@ -50,7 +50,7 @@
 - Fixed duplicate key entries in database
 - Fixed phantom duplicate counting
 
-31/03/26
+31/04/26
 
 - Fixed the failed on-chain claim TX deleted a CD key in databas
 - Added nextjs tests

@@ -226,10 +226,20 @@ Refactoring the code:
 - Added nextjs tests.
 - Deleted CDKeyEncryption.ts component. No longer needed, the encryption is handled elsewhere.
 
-01/03/26
+01/04/26
 
 - Swapped the viem.verigyMessage to SIWE authentication -> tighter security
 - Added tests
+
+05/09/26
+
+- Soulkey.sol, game contract -> added a _validatecommit function to check and prevent multiple mints with the same hash.
+- Cdkey was reserved forever in the DB after metamask mint cancellation, now expires after 15 mins. (refunds still don't register in the DB when a site is refreshed)
+
+06/09/26
+
+- DB refunded cdkeys are now mintable again.
+- Soulkey.sol, totalSupply >= maxSupply -> refunds no longer block maxSupply. Refunds reduce totalSupply
 
 12/09/26
 
