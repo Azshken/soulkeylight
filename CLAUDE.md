@@ -6,12 +6,13 @@
 ## What This Project Is
 
 SoulKey sells game CD keys as NFTs called **Virtual Game Cards (VGCs)**. Users mint a VGC, claim
-their CD key (encrypts it to their wallet using X25519 derived from `personal_sign`, makes the NFT
-permanently soulbound), and can request a refund within 14 days (5% fee retained).
+their CD key (encrypted to their wallet with X-Wing — ML-KEM-768 + X25519 — derived from
+`personal_sign`, makes the NFT permanently soulbound), and can request a refund within 14 days
+(5% fee retained).
 
-V1 (current, grant-funded): X25519 encryption, single operator.
-V2 (post-grant): Hybrid X25519 + ML-KEM-768 encryption; developer-owned contracts; permissionless
-publishing.
+V1 (current, grant-funded): X-Wing claim encryption (v2 blobs; X25519 v1 dual-read), single operator.
+V2 (post-grant): developer-owned contracts; permissionless publishing (PQ encryption shipped
+12/09/26).
 
 **Live demo:** https://soulkey.vercel.app/ (Sepolia testnet)
 **Repo:** https://github.com/Azshken/soulkeylight
@@ -25,7 +26,7 @@ publishing.
 | Backend | Next.js API routes |
 | Database | PostgreSQL via Neon serverless |
 | NFT metadata | Dynamic Vercel API endpoint + Pinata IPFS (frozen post-claim) |
-| Encryption | AES-256 server-side (retained post-claim); X25519 on-chain (v1); hybrid X25519 + ML-KEM-768 in v2 |
+| Encryption | AES-256-GCM server-side (deleted after confirmed claim); X-Wing ML-KEM-768 + X25519 on-chain (v2 default); X25519 (v1, dual-read) |
 | Payments | ETH, USDT, USDC |
 | Hosting | Vercel |
 | Tests | Vitest + Testing Library (Next.js API + component tests) |
@@ -64,6 +65,8 @@ soulkeylight/
     │   │   ├── verify.test.ts            # full SIWE verify gauntlet
     │   │   └── auth-guard.test.ts        # 401/403 on all protected routes
     │   ├── utils/
+    │   │   ├── crypto.test.ts            # AES-256-GCM at-rest: wire, tamper, CBC fixture
+    │   │   ├── xwing.test.ts             # X-Wing seed, blob layout, roundtrip, v1 dual-read
     │   │   └── helpers.test.ts           # toBytes32 / toHexBytes unit tests
     │   ├── HomeClient.claimCdKey.test.tsx # claim flow integration tests
     │   └── HomeClient.resume.test.tsx    # refresh-resume lifecycle for in-flight txs
@@ -105,11 +108,12 @@ soulkeylight/
     └── utils/
         ├── abis.ts                   # single source of truth for all ABIs
         ├── adminSession.ts           # iron-session config + requireAdminSession()
-        ├── crypto.ts                 # encryptWithX25519, decryptWithX25519, encrypt, hashCDKey
-        ├── db.ts                     # all DB queries
+        ├── crypto.ts                 # server: AES-256-GCM at-rest (v2gcm:), encryptWithXWing (v2), encryptWithX25519 (v1), hashCDKey
+        ├── db.ts                     # all DB queries (incl. clearEncryptedKey — confirm's last step)
         ├── helpers.ts                # toBytes32, toHexBytes — shared across component + tests
         ├── pendingTx.ts              # sessionStorage record for in-flight txs (refresh resume)
-        └── x25519.ts                 # browser X25519: HKDF derive from personal_sign, WebCrypto decrypt
+        ├── x25519.ts                 # browser X25519 (v1): HKDF derive from personal_sign, WebCrypto decrypt
+        └── xwing.ts                  # X-Wing (v2): seed derive (salt soulkey-xwing-v2), keygen, dual-read reveal
 ```
 
 ## Smart Contracts
@@ -118,16 +122,19 @@ soulkeylight/
 Key functions:
 - `mintWithETH(bytes32 cdCommitmentHash)` — exact ETH required, no refund path
 - `mintWithUSDT(bytes32)` / `mintWithUSDC(bytes32)` — pulls tokens directly into vault
-- `claimCdKey(uint256 tokenId, bytes32 cdKeyHash, bytes ownerEncryptedKey)` — writes X25519
-  ciphertext (~60 bytes in v1) on-chain, makes NFT soulbound, releases vault reserve
+- `claimCdKey(uint256 tokenId, bytes32 cdKeyHash, bytes ownerEncryptedKey)` — writes the
+  wallet-encrypted key on-chain (v2 X-Wing ~1.15 KB, 0x02-prefixed; legacy v1 ~60 B), makes NFT
+  soulbound, releases vault reserve
 - `burnByVault(uint256 tokenId)` — only vault can call this (refund flow)
 - `burn(uint256 tokenId)` — user can only burn already-claimed (soulbound) tokens
+- Mint cap = lifetime mints − unclaimed refund burns (`_refundBurnedCount`, incremented only in
+  `burnByVault` when `!wasSoulbound`); claimed burns never free a slot (commitmentInUse stays)
 - `getEncryptedCDKey(uint256)`, `getCommitmentHash(uint256)`, `getClaimTimestamp(uint256)`
 
 Soulbound = `claimTimestamp[tokenId] != 0`. Transfer blocked in `_update()` override.
 **SoulKey holds NO funds** — all payments forwarded to vault via `collectPayment`.
-**No `updateEncryptionKey`** — not needed given AES retention + HKDF forward-compatible design.
-See DECISIONS.md.
+**No `updateEncryptionKey`** — no migration path exists; a token stays on the scheme it was
+claimed with (client dual-read). See DECISIONS.md.
 
 ### MasterKeyVault.sol — deployed once, shared across all games
 Reserve lifecycle: Locked → ReleasedByClaim | ReleasedByExpiry | Refunded
@@ -151,7 +158,8 @@ reserve_releases — audit log of reservation releases
 ```
 
 ⚠️ `mints.token_id` has NO global UNIQUE — token IDs are scoped per contract. Each game starts from token_id=1.
-⚠️ `cd_keys.encrypted_key` — NOT nulled after claim in v1. Retained as v2 migration enabler.
+⚠️ `cd_keys.encrypted_key` — DELETED (NULL) after a CONFIRMED claim (clearEncryptedKey, last
+confirm step). Failed claims KEEP the row. No v1→v2 migration — first public deploy is production.
 ⚠️ `products.image_claimed_cid` — optional post-claim cover art. Falls back to `image_cid` if null.
 
 ## Core Flow
@@ -162,10 +170,12 @@ reserve_releases — audit log of reservation releases
 3. User mints on-chain with commitmentHash
 4. Frontend → POST /api/mint/link-token → row into mints, reserved_by cleared
 5. User → POST /api/redeem:
-     - personal_sign → HKDF-SHA256 (full 65-byte IKM, 32-byte output) → X25519 keypair
-     - x25519PublicKey sent to server
-     - Server AES-decrypts CD key, runs encryptWithX25519(cdKey, x25519Pk)
-     - Returns ~60 byte X25519 ciphertext
+     - personal_sign → HKDF-SHA256 (full 65-byte IKM):
+         salt "soulkey-xwing-v2" → 32-byte X-Wing seed → X-Wing keypair (pk 1,216 B)
+         salt "soulkey-hybrid-v1" → v1 X25519 keypair (legacy fallback, sent alongside)
+     - xwingPublicKey sent to server
+     - Server AES-decrypts CD key (GCM/CBC dual-read), runs encryptWithXWing(cdKey, xwingPk)
+     - Returns ~1.15 KB v2 ciphertext (0x02 || xwingCt || nonce || tag || aesCt)
      - Partial redemption row inserted (wallet_encrypted_cdkey only)
 6. User calls claimCdKey on-chain with ciphertext → NFT soulbound, vault reserve released
 7. Frontend → POST /api/redeem/confirm:
@@ -174,7 +184,8 @@ reserve_releases — audit log of reservation releases
    c. confirmRedemption() fills redeemed_by / tx data into existing partial row
    d. Pinata upload → frozen_metadata_cid saved (non-fatal if it fails)
    e. recordReserveRelease() audit log
-   f. AES copy in cd_keys.encrypted_key is RETAINED (v2 migration enabler — NOT deleted)
+   f. clearEncryptedKey deletes cd_keys.encrypted_key — LAST step, only after a–c passed;
+      any failure keeps the row (retry/resume re-runs confirm; idempotent)
 8. (Optional) Refund within 14 days → POST /api/refund records in DB
 ```
 
@@ -183,28 +194,34 @@ moment the wallet returns a txHash until its DB write lands. On next page load H
 unfinished records from the tx receipt. `/api/refund` is idempotent on `refund_tx_hash`, like
 link-token on `mint_tx_hash`.
 
-## Encryption Summary (v1)
+## Encryption Summary
 
-The deprecated `eth_getEncryptionPublicKey` / `eth_decrypt` are replaced with X25519 derived from
-`personal_sign` + HKDF-SHA256. V2 (post-grant) upgrades to hybrid X25519 + ML-KEM-768.
+**v2 (default, shipped 12/09/26): X-Wing** — ML-KEM-768 + X25519 hybrid via `@noble/post-quantum`
+0.7.1 (pinned exactly; export `ml_kem768_x25519`). **v1 (legacy, decrypt-only):** X25519 from
+`personal_sign` + HKDF-SHA256. Both replaced the deprecated `eth_getEncryptionPublicKey` /
+`eth_decrypt`. No HQC, no McEliece, no homemade hybrid.
 
-**v1 key derivation:**
+**Key derivation — one `personal_sign` feeds both schemes:**
 ```
 personal_sign("SoulKey encryption key v1\nAddress: <wallet>")
-  → HKDF-SHA256(IKM = full 65 bytes, salt = "soulkey-hybrid-v1", length = 32)
-  → [0..32]  X25519 secret key → X25519 public key
+  → v2: HKDF-SHA256(IKM = full 65 bytes, salt = "soulkey-xwing-v2", length = 32)
+        → X-Wing seed → ml_kem768_x25519.keygen(seed) → pk 1,216 B
+        (the KEM expands the seed internally — NEVER expand to 96 bytes; that plan is dead)
+  → v1: HKDF-SHA256(IKM = full 65 bytes, salt = "soulkey-hybrid-v1", length = 32)
+        → X25519 secret key → X25519 public key (legacy reveals only)
 ```
 
-Server encrypts with `encryptWithX25519(cdKey, x25519Pk)` → ~60 byte ciphertext stored on-chain.
-Client re-derives X25519 secret at reveal time and decrypts locally. Keypair cached in `useRef`
-for the session — claim + immediate reveal = one `personal_sign` prompt total.
-
-**HKDF forward compatibility:** v2 requests `length = 96` from the same derivation to add the
-ML-KEM-768 seed. V1 ciphertexts remain decryptable — the extra 64 bytes are simply not needed
-until the v2 migration transaction for each token.
+Server encapsulates to the user's X-Wing pk and AES-256-GCMs the CD key with the 32-byte shared
+secret directly (X-Wing's SHA3-256 combiner already KDFs it). On-chain v2 blob:
+`0x02 || xwingCt(1120) || nonce(12) || tag(16) || aesCt` (~1.15 KB). Reveal dual-reads:
+0x02-prefixed ≥1150-byte blob → X-Wing; unprefixed → v1 X25519 (length disambiguates — a v1
+ephPk can randomly start with 0x02). Both keypairs cached in `useRef` — claim + reveal = one
+`personal_sign` prompt per session.
 
 ⚠️ HKDF IKM must use ALL 65 signature bytes. `getBytes(sig).slice(0, 32)` halves entropy silently.
-⚠️ AES copy in `cd_keys.encrypted_key` must NOT be deleted in v1 (v2 migration enabler).
+⚠️ `cd_keys.encrypted_key` (at-rest: `v2gcm:` AES-256-GCM writes, legacy CBC dual-read) is
+DELETED after a confirmed claim — `clearEncryptedKey` is the last confirm step. Failed claims
+KEEP it. No v1→v2 migration; first public deploy is production.
 
 ## Admin Auth (SIWE — implemented)
 
@@ -245,9 +262,10 @@ pnpm test        # run once
 pnpm test:watch  # watch mode
 ```
 
-Tests in `nextjs/__tests__/`. 63 tests: 35 admin auth + claim flow + refresh-resume lifecycle
-(HomeClient.resume.test.tsx) + helpers unit tests. Wagmi hooks and `window.ethereum` fully
-mocked — no wallet or DB needed.
+Tests in `nextjs/__tests__/`. 81 tests: 35 admin auth + claim flow + refresh-resume lifecycle
++ helpers + crypto at-rest (GCM wire/tamper/CBC fixture) + X-Wing (seed, blob layout,
+roundtrip, v1 dual-read). Wagmi hooks and `window.ethereum` fully mocked — no wallet or DB
+needed.
 
 When updating `HomeClient.claimCdKey.test.tsx` for the new encryption scheme, the
 `window.ethereum` mock uses `personal_sign` (not `eth_getEncryptionPublicKey`). The mock
@@ -258,7 +276,7 @@ produces a consistent X25519 keypair across test runs.
 ## Docs
 
 - `docs/ARCHITECTURE.md` — full system design including encryption scheme, v2 architecture overview
-- `docs/DECISIONS.md` — why things were built this way (includes v1/v2 encryption split, AES
-  retention, ZK deferral, v2 developer ownership)
+- `docs/DECISIONS.md` — why things were built this way (includes the v1/v2 encryption split —
+  see the 12/09/26 supersede notes — ZK deferral, v2 developer ownership)
 - `docs/GOTCHAS.md` — hard-won lessons and non-obvious bugs
 - `docs/OPEN_ISSUES.md` — current task list and mainnet checklist

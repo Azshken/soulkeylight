@@ -249,6 +249,23 @@ Refactoring the code:
 - Fixed the 4 failing claim tests — the personal_sign mock was 33 bytes, the X25519 derivation demands the full 65
 - 63/63 tests green, tsc clean. Lint and production build fail identically at HEAD — broken root pnpm store (eslint-config-next peer link; missing @x402/* deps of @coinbase/cdp-sdk), not related to these changes
 
+12/09/26 (crypto & supply)
+
+- Shipped post-quantum claims NOW instead of post-grant: X-Wing (ML-KEM-768 + X25519) is the
+  default claim cipher — @noble/post-quantum 0.7.1 pinned, no homemade hybrid, no HQC/McEliece.
+  On-chain blob is 0x02-prefixed (~1.15 KB). The same single personal_sign feeds both schemes:
+  HKDF salt "soulkey-xwing-v2" → 32-byte seed (the KEM expands it internally — the April
+  length-96 plan is dead). Reveal dual-reads, so already-claimed Sepolia v1 tokens keep working.
+- Killed the v1→v2 migration idea entirely: a confirmed claim now DELETES cd_keys.encrypted_key
+  (clearEncryptedKey restored, last confirm step). First public deploy is production.
+- Neon at-rest copy moved to AES-256-GCM (v2gcm: prefix); old CBC rows keep decrypting; a
+  tampered nibble now throws instead of yielding garbage.
+- Fixed the mint-cap accounting in SoulKey.sol: totalSupply() subtracted claimed burns and
+  silently freed slots the chain never frees (commitmentInUse stays set). Gate = lifetime mints
+  minus refund burns now. Sepolia bytecode is immutable — lands with the next deployment.
+- Env: regenerated the stale nextjs lockfile, rebuilt node_modules — build green again, 81/81
+  tests, tsc clean. forge test on Fedora: 98/98.
+
 Notes:
 
 - This type of learning suits me the best (vibe coding). I have ideas in my head and no years of expertise. I can't learn for the sake of learning I hit a wall (because there is so much to know), get quickly demotivated and lose my goal by learning bloat that I may or may not use for my project ideas. With vibe coding I do, then fill up the gaps of knowledge by understanding how the pieces connect and how they work; step by step.

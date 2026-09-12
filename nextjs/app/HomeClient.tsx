@@ -8,12 +8,16 @@ import type { NextPage } from "next";
 import { decodeEventLog, formatEther } from "viem";
 import type { Log } from "viem";
 import {
-  decryptX25519WebCrypto,
   deriveX25519SecretFromSignature,
   encryptionSignMessage,
   toUnprefixedHex,
   x25519PublicFromSecret,
 } from "@/utils/x25519";
+import {
+  decryptClaimCiphertextWebCrypto,
+  deriveXWingSeedFromSignature,
+  xwingKeypairFromSeed,
+} from "@/utils/xwing";
 import {
   useAccount,
   usePublicClient,
@@ -143,7 +147,15 @@ const Home: NextPage = () => {
   const { address: connectedAddress } = useAccount();
   const publicClient = usePublicClient();
   const { writeContractAsync } = useWriteContract();
-  const x25519KeypairRef = useRef<{ sk: Uint8Array; pk: Uint8Array } | null>(null);
+  // Both claim keypairs, derived from ONE personal_sign and cached per
+  // session: v1 X25519 (reveals already-claimed Sepolia tokens) plus the v2
+  // X-Wing seed/public key (default for all new claims).
+  const claimKeysRef = useRef<{
+    x25519Sk: Uint8Array;
+    x25519Pk: Uint8Array;
+    xwingSeed: Uint8Array;
+    xwingPk: Uint8Array;
+  } | null>(null);
 
   // True while a wallet-driven flow (mint/claim/refund or a resume) is awaiting
   // in this tab. The refresh-resume effect skips while set, so it never races
@@ -386,7 +398,7 @@ const Home: NextPage = () => {
   // Reset UI-only state on game or token switch.
   // Data state is managed by wagmi hooks and fetchOwnedTokens — not reset here.
   useEffect(() => {
-    x25519KeypairRef.current = null;
+    claimKeysRef.current = null;
     setRevealedKey("");
   }, [connectedAddress]);
 
@@ -572,8 +584,11 @@ const Home: NextPage = () => {
   // ─── Claim CD Key ─────────────────────────────────────────────────────────
 
 
-  const deriveX25519Keypair = async (walletAddress: string) => {
-    if (x25519KeypairRef.current) return x25519KeypairRef.current;
+  // One personal_sign feeds BOTH derivations; the distinct HKDF salts
+  // (soulkey-hybrid-v1 / soulkey-xwing-v2) domain-separate them. The X-Wing
+  // seed is 32 bytes — the KEM expands it internally. Never expand to 96.
+  const deriveClaimKeys = async (walletAddress: string) => {
+    if (claimKeysRef.current) return claimKeysRef.current;
     const ethereum = (window as any).ethereum;
     if (!ethereum?.request) {
       throw new Error("No injected wallet found");
@@ -582,11 +597,13 @@ const Home: NextPage = () => {
       method: "personal_sign",
       params: [encryptionSignMessage(walletAddress), walletAddress],
     });
-    const sk = deriveX25519SecretFromSignature(sig);
-    const pk = x25519PublicFromSecret(sk);
-    const pair = { sk, pk };
-    x25519KeypairRef.current = pair;
-    return pair;
+    const x25519Sk = deriveX25519SecretFromSignature(sig);
+    const x25519Pk = x25519PublicFromSecret(x25519Sk);
+    const xwingSeed = deriveXWingSeedFromSignature(sig);
+    const xwingPk = xwingKeypairFromSeed(xwingSeed).publicKey;
+    const keys = { x25519Sk, x25519Pk, xwingSeed, xwingPk };
+    claimKeysRef.current = keys;
+    return keys;
   };
 
   const handleClaimCDKey = async () => {
@@ -611,8 +628,9 @@ const Home: NextPage = () => {
     setLoading(true);
     setMintingStep("Deriving encryption key from wallet...");
     try {
-      const { pk } = await deriveX25519Keypair(connectedAddress);
-      const x25519PublicKey = toUnprefixedHex(pk);
+      const keys = await deriveClaimKeys(connectedAddress);
+      const xwingPublicKey = toUnprefixedHex(keys.xwingPk);
+      const x25519PublicKey = toUnprefixedHex(keys.x25519Pk);
 
       setMintingStep("Retrieving and encrypting CD key...");
       const redeemRes = await fetch("/api/redeem", {
@@ -621,6 +639,10 @@ const Home: NextPage = () => {
         body: JSON.stringify({
           tokenId: selectedLibraryTokenId,
           userAddress: connectedAddress,
+          // X-Wing (v2) is the default claim cipher. The legacy X25519 key
+          // rides along for deploy-skew (an old server bundle only knows
+          // x25519PublicKey); a current server always prefers the X-Wing key.
+          xwingPublicKey,
           x25519PublicKey,
           contractAddress: libraryContractAddress,
         }),
@@ -740,8 +762,13 @@ const Home: NextPage = () => {
       }
 
       setMintingStep("Decrypting with your wallet key...");
-      const { sk } = await deriveX25519Keypair(connectedAddress);
-      const decrypted = await decryptX25519WebCrypto(encryptedBytes, sk);
+      const keys = await deriveClaimKeys(connectedAddress);
+      // Dual-read: v2 X-Wing blobs (0x02-prefixed) and v1 X25519 blobs
+      // already claimed on Sepolia (unprefixed) both decrypt here.
+      const decrypted = await decryptClaimCiphertextWebCrypto(encryptedBytes, {
+        x25519SecretKey: keys.x25519Sk,
+        xwingSeed: keys.xwingSeed,
+      });
       setRevealedKey(decrypted);
       toast.success("CD key revealed successfully!");
     } catch (error: any) {

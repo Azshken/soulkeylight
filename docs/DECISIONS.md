@@ -79,6 +79,10 @@ escape hatch for future encryption scheme migration. Decided against it.
    means v2 hybrid migration requires only one `personal_sign` from the user, with the server
    handling re-encryption invisibly. An on-chain migration function adds complexity without benefit
    given this architecture.
+   *(Superseded premise 12/09/26: the AES copy is now deleted at confirmed claim and X-Wing
+   shipped as the default claim cipher — no migration path exists at all. The conclusion stands
+   even stronger: with no server-side re-encryption path, an on-chain migration function could
+   never be exercised.)*
 
 **Conclusion:** No contract changes for encryption migration. The AES retention + single `personal_sign`
 path is the correct approach for scheme upgrades.
@@ -105,8 +109,17 @@ to v2.
    secret key only). V2 extends this to `length = 96` (adding the 64-byte ML-KEM-768 seed) without
    invalidating v1 ciphertexts. The salt `"soulkey-hybrid-v1"` is shared, preserving the same
    derivation root.
+   **(Superseded 12/09/26: v2 derives a separate 32-byte X-Wing seed via HKDF salt
+   `"soulkey-xwing-v2"` from the same signature — no length-96 expansion, and the v1 salt is
+   not reused.)**
 
 ### AES copy retained post-claim as v2 migration enabler
+
+> **⚠️ SUPERSEDED 12/09/26:** confirmed claims now DELETE `cd_keys.encrypted_key`
+> (`clearEncryptedKey` restored as the final confirm step; failed claims keep the row). There is
+> no v1→v2 migration — X-Wing shipped as the default claim cipher and the first public deploy is
+> production. See *12/09/26 — Crypto v2 (X-Wing) & supply cap* below. Original text follows.
+
 The AES-256 server-side copy of the CD key (`cd_keys.encrypted_key`) is **not deleted** after
 `claimCdKey` confirms on-chain in v1. This is intentional.
 
@@ -128,6 +141,12 @@ migration is the event that renders the AES copy safe to delete.
 token, once that token's ciphertext has been successfully upgraded to hybrid and confirmed on-chain.
 
 ### v2 scheme: Hybrid X25519 + ML-KEM-768 (post-grant)
+
+> **⚠️ SUPERSEDED 12/09/26:** v2 shipped pre-grant as **X-Wing** (ML-KEM-768 + X25519) via
+> `@noble/post-quantum` 0.7.1 (pinned) — a specified library hybrid, not a homemade HKDF-96
+> expansion of the v1 salt. See *12/09/26 — Crypto v2 (X-Wing) & supply cap* below. Original
+> text follows as history.
+
 After v1 mainnet deployment and the CodeHawks audit, the encryption scheme will be upgraded to
 hybrid X25519 + ML-KEM-768 (NIST FIPS 203). This is the same pattern used in TLS 1.3 by Google,
 Go, and Java for "harvest now, decrypt later" quantum protection.
@@ -183,6 +202,11 @@ the on-chain tx.
 `rowCount === 0` guard) rather than silently creating a broken row.
 
 ### clearEncryptedKey removed from confirm flow (v1 decision)
+
+> **⚠️ SUPERSEDED 12/09/26:** `clearEncryptedKey` is restored — it runs as the very last step of
+> `/api/redeem/confirm`, only after receipt success + `getClaimTimestamp > 0` +
+> `confirmRedemption`. Failed claims keep the row. See the 12/09/26 section below.
+
 The step that nulled `cd_keys.encrypted_key` after claim has been removed in v1. The AES copy is
 retained as the v2 migration enabler. See *AES copy retained post-claim as v2 migration enabler*
 above.
@@ -313,7 +337,7 @@ require operator action for keys to go live — the window simply expires. Estab
 
 ### ZK proofs: deferred
 ZK proofs were evaluated as a potential enhancement, primarily to reduce on-chain ciphertext size.
-The v2 ML-KEM-768 ciphertext is ~1,168 bytes. A ZK proof of correct encryption would be ~256 bytes
+The v2 X-Wing ciphertext is ~1.15 KB (shipped 12/09/26). A ZK proof of correct encryption would be ~256 bytes
 (Groth16), saving ~680,000 gas per claim at current prices (~$13).
 
 **Why deferred — ML-KEM is not ZK-friendly:** ZK circuits operate over large prime fields (BN254
@@ -357,3 +381,48 @@ Replaced the old timestamp + `verifyMessage` + on-chain owner pattern with full 
 - Test addresses must be valid 40-char hex. Readable-but-invalid strings like `"0xGameContract..."`
   fail route input validation with 400 before ownership checks are reached.
 - In Vitest, `require()` inside a `beforeEach` bypasses the mock registry. Use top-level imports.
+---
+
+## 12/09/26 — Crypto v2 (X-Wing) & supply cap
+
+### X-Wing as the default claim cipher (v2)
+New claims write X-Wing (ML-KEM-768 + X25519) ciphertext:
+`0x02 || xwingCt(1120) || nonce(12) || tag(16) || aesCt`, AES-256-GCM keyed by the 32-byte
+X-Wing shared secret directly (its SHA3-256 combiner already KDFs both component secrets).
+Library: `@noble/post-quantum` **0.7.1, pinned exactly** — export `ml_kem768_x25519`.
+**Why:** on-chain ciphertext is permanent and the first public deploy is production. Shipping
+PQ from day one eliminates the migration problem entirely. Supersedes the April plan to
+hand-roll a hybrid from a length-96 HKDF expansion of the v1 salt.
+**Seed:** HKDF-SHA256(IKM = full 65-byte personal_sign, salt `"soulkey-xwing-v2"`, length = 32).
+Distinct salt from v1 (`"soulkey-hybrid-v1"`); the KEM expands the 32-byte seed internally —
+never expand to 96 bytes client-side. One `personal_sign` still feeds both schemes.
+**Dual-read:** reveal decrypts v2 (0x02-prefixed, ≥1150 bytes) and v1 (unprefixed) blobs.
+Version detection is length-based because a v1 blob's random ephemeral public key can start
+with any byte, including 0x02. `/api/redeem` prefers `xwingPublicKey` but still accepts the
+legacy 32-byte `x25519PublicKey` for deploy-skew (cached frontends). No HQC, no McEliece.
+
+### Delete the AES copy after a confirmed claim
+`clearEncryptedKey` runs ONLY in `/api/redeem/confirm`, and only after receipt.status ===
+success AND `getClaimTimestamp > 0` AND `confirmRedemption` succeeded. A failed claim KEEPS
+the row (retry/resume re-runs confirm; nulling is idempotent).
+**Why:** with no v1→v2 migration, a retained AES copy is pure attack surface with no upside.
+Supersedes *AES copy retained post-claim as v2 migration enabler*.
+
+### AES-256-GCM for Neon cd_keys.encrypted_key
+New at-rest writes use AES-256-GCM with wire format `v2gcm:ivHex:ctHex:tagHex` (12-byte IV,
+16-byte tag); legacy `ivHex:ctHex` CBC rows keep decrypting via the same `decrypt()`.
+Same 32-byte `ENCRYPTION_KEY` env hex — no rotation, no rewrite job.
+**Why:** the GCM auth tag turns DB tampering (or corruption) into a loud failure instead of
+silent garbage plaintext. CBC had no integrity.
+
+### Mint cap = lifetime mints − refund burns
+`_validateCommitment` no longer uses `totalSupply()` (which subtracts ALL burns). The gate is
+`nextTokenId - 1 - _refundBurnedCount >= maxSupply → MaxSupplyReached`, and `_refundBurnedCount`
+increments only in `burnByVault` when `!wasSoulbound`. `setMaxSupply`'s lower bound uses the
+same figure.
+**Why:** burning a claimed (soulbound) token must NOT free a mint slot — its `commitmentInUse`
+entry stays set forever, so freeing the slot would let lifetime mints exceed maxSupply while
+commitments stay locked. Unclaimed refund burns free both the slot and the commitment.
+**Deployment note:** existing Sepolia bytecode is immutable — the fix applies to future
+deployments only; already-deployed contracts keep the old accounting.
+

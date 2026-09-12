@@ -9,6 +9,7 @@ import {
   parseX25519Ciphertext,
   x25519SharedSecret,
 } from "./x25519";
+import { XWING_PK_BYTES, XWING_VERSION_BYTE, xwingEncapsulate } from "./xwing";
 
 const ENCRYPTION_KEY = Buffer.from(
   process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString("hex"),
@@ -24,16 +25,28 @@ export function hashCDKey(cdkey: string): string {
   return crypto.createHash("sha256").update(cdkey).digest("hex");
 }
 
-/** AES-256-CBC for Neon cd_keys.encrypted_key. Do not change wire format. */
+/** Wire prefix for AES-256-GCM rows. Rows without it are legacy AES-256-CBC. */
+const GCM_PREFIX = "v2gcm:";
+const GCM_IV_BYTES = 12;
+const GCM_TAG_BYTES = 16;
+
+/**
+ * AES-256-GCM for Neon cd_keys.encrypted_key (all new writes).
+ * Wire format: "v2gcm:" + ivHex(12B) + ":" + ctHex + ":" + tagHex(16B).
+ * The auth tag turns any DB tamper (even one flipped nibble) into a thrown
+ * error instead of silent garbage plaintext. ENCRYPTION_KEY stays the same
+ * 32-byte env hex used by the legacy CBC rows — no rotation, no rewrite job.
+ */
 export function encrypt(text: string): string {
-  const iv = crypto.randomBytes(16);
-  const cipher = crypto.createCipheriv("aes-256-cbc", ENCRYPTION_KEY, iv);
-  let encrypted = cipher.update(text, "utf8", "hex");
-  encrypted += cipher.final("hex");
-  return `${iv.toString("hex")}:${encrypted}`;
+  const iv = crypto.randomBytes(GCM_IV_BYTES);
+  const cipher = crypto.createCipheriv("aes-256-gcm", ENCRYPTION_KEY, iv);
+  const ct = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${GCM_PREFIX}${iv.toString("hex")}:${ct.toString("hex")}:${tag.toString("hex")}`;
 }
 
-export function decrypt(encryptedData: string): string {
+/** Legacy AES-256-CBC rows: ivHex(16B) + ":" + ctHex. Decrypt-only — never re-written. */
+function decryptLegacyCbc(encryptedData: string): string {
   const [ivHex, encrypted] = encryptedData.split(":");
   const iv = Buffer.from(ivHex, "hex");
   const decipher = crypto.createDecipheriv("aes-256-cbc", ENCRYPTION_KEY, iv);
@@ -42,8 +55,37 @@ export function decrypt(encryptedData: string): string {
   return decrypted;
 }
 
+function decryptGcm(encryptedData: string): string {
+  const [prefix, ivHex, ctHex, tagHex] = encryptedData.split(":");
+  if (prefix !== "v2gcm" || ivHex === undefined || ctHex === undefined || tagHex === undefined) {
+    throw new Error("Malformed v2gcm ciphertext");
+  }
+  const iv = Buffer.from(ivHex, "hex");
+  const tag = Buffer.from(tagHex, "hex");
+  if (iv.length !== GCM_IV_BYTES || tag.length !== GCM_TAG_BYTES) {
+    throw new Error("Malformed v2gcm ciphertext: bad IV or tag length");
+  }
+  const decipher = crypto.createDecipheriv("aes-256-gcm", ENCRYPTION_KEY, iv);
+  decipher.setAuthTag(tag);
+  const pt = Buffer.concat([
+    decipher.update(Buffer.from(ctHex, "hex")),
+    decipher.final(), // throws on any tamper — GCM auth failure
+  ]);
+  return pt.toString("utf8");
+}
+
+/** Decrypts both wire formats: "v2gcm:" GCM rows and legacy ivHex:ctHex CBC rows. */
+export function decrypt(encryptedData: string): string {
+  return encryptedData.startsWith(GCM_PREFIX)
+    ? decryptGcm(encryptedData)
+    : decryptLegacyCbc(encryptedData);
+}
+
 /**
- * On-chain v1 ciphertext: ephPk(32) | nonce(12) | aesCt | tag(16)
+ * LEGACY on-chain v1 ciphertext: ephPk(32) | nonce(12) | aesCt | tag(16).
+ * Kept only for deploy-skew (cached pre-X-Wing frontends still send a 32-byte
+ * X25519 key). New claims go through encryptWithXWing. v1 blobs remain
+ * decryptable at reveal forever (dual-read in utils/xwing.ts).
  * Returns 0x-prefixed hex for claimCdKey(bytes).
  */
 export function encryptWithX25519(plaintext: string, userX25519PublicKeyHex: string): string {
@@ -70,3 +112,27 @@ export function decryptWithX25519(ciphertextHex: string, userX25519SecretKeyHex:
   decipher.setAuthTag(Buffer.from(tag));
   return Buffer.concat([decipher.update(Buffer.from(ct)), decipher.final()]).toString("utf8");
 }
+/**
+ * On-chain v2 (X-Wing) ciphertext — the default for all new claims:
+ *   version(0x02) || xwing_ct(1120) || nonce(12) || tag(16) || aes_ct
+ * The AES-256-GCM key is the 32-byte X-Wing shared secret used directly:
+ * X-Wing already KDFs both component secrets through its SHA3-256 combiner.
+ * Returns 0x-prefixed hex for claimCdKey(bytes) — ~1150+ plaintext bytes.
+ */
+export function encryptWithXWing(plaintext: string, userXWingPublicKeyHex: string): string {
+  const userPk = hexToExactBytes(userXWingPublicKeyHex, XWING_PK_BYTES);
+  const { cipherText, sharedSecret } = xwingEncapsulate(userPk);
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(sharedSecret), nonce);
+  const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const blob = Buffer.concat([
+    Buffer.from([XWING_VERSION_BYTE]),
+    Buffer.from(cipherText),
+    nonce,
+    tag,
+    ct,
+  ]);
+  return `0x${blob.toString("hex")}`;
+}
+

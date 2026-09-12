@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createPublicClient, http, parseAbi } from "viem";
 
 import { sepolia } from "viem/chains";
-import { decrypt, encryptWithX25519 } from "@/utils/crypto";
+import { decrypt, encryptWithX25519, encryptWithXWing } from "@/utils/crypto";
 import { createRedemptionRecord, getCDKeyByTokenId } from "@/utils/db";
 
 export async function POST(req: NextRequest) {
@@ -16,17 +16,28 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
 
-    const { tokenId, userAddress, x25519PublicKey, userPublicKey, contractAddress } = body;
-    const userPk = x25519PublicKey ?? userPublicKey;
-    if (!tokenId || !userAddress || !userPk) {
+    const { tokenId, userAddress, xwingPublicKey, x25519PublicKey, userPublicKey, contractAddress } = body;
+    const legacyPk = x25519PublicKey ?? userPublicKey;
+    const xwHex = typeof xwingPublicKey === "string" ? xwingPublicKey.replace(/^0x/, "") : "";
+    const pkHex = typeof legacyPk === "string" ? legacyPk.replace(/^0x/, "") : "";
+    if (!tokenId || !userAddress || (!xwHex && !pkHex)) {
       return NextResponse.json(
         { success: false, error: "Missing required fields" },
         { status: 400 },
       );
     }
 
-    const pkHex = String(userPk).replace(/^0x/, "");
-    if (!/^[0-9a-fA-F]{64}$/.test(pkHex)) {
+    // New claims default to X-Wing (v2 on-chain ciphertext). A legacy 32-byte
+    // X25519 key is still accepted so browser caches running the pre-X-Wing
+    // frontend can finish a claim — those v1 blobs stay readable forever
+    // (dual-read on reveal). X-Wing pk = 1216 bytes = 2432 hex chars.
+    if (xwHex && !/^[0-9a-fA-F]{2432}$/.test(xwHex)) {
+      return NextResponse.json(
+        { success: false, error: "xwingPublicKey must be 1216 bytes (2432 hex chars)" },
+        { status: 400 },
+      );
+    }
+    if (!xwHex && !/^[0-9a-fA-F]{64}$/.test(pkHex)) {
       return NextResponse.json(
         { success: false, error: "x25519PublicKey must be 32 bytes (64 hex chars)" },
         { status: 400 },
@@ -99,7 +110,11 @@ export async function POST(req: NextRequest) {
     }
 
     const plaintextCDKey = decrypt(cdkeyRecord.encrypted_key);
-    const encryptedForUser = encryptWithX25519(plaintextCDKey, pkHex);
+    // X-Wing is the write path for every new claim; the X25519 branch only
+    // serves legacy cached clients that cannot send an X-Wing key.
+    const encryptedForUser = xwHex
+      ? encryptWithXWing(plaintextCDKey, xwHex)
+      : encryptWithX25519(plaintextCDKey, pkHex);
     await createRedemptionRecord(cdkeyRecord.id, encryptedForUser);
 
     return NextResponse.json({
