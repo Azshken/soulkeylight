@@ -7,53 +7,9 @@ Update at the end of every Claude Code session.
 
 ## 🔴 High Priority
 
-### Replace eth_getEncryptionPublicKey / eth_decrypt — mainnet blocker
-**Risk:** Both MetaMask methods are deprecated (since June 2022) and can be removed in any browser
-extension update. Because the encrypted CD key is written **permanently on-chain** after
-`claimCdKey`, any user who claimed a token before a fix is applied would permanently lose access to
-their CD key the moment MetaMask removes the method. There is no recovery path without the
-server-side AES copy.
-
-**Plan (v1):** Replace with `personal_sign` → HKDF-SHA256 → X25519 scheme. All crypto runs in the
-browser via `@noble/curves`. No wallet-specific APIs required — works on MetaMask, Rabby, Rainbow,
-Brave Wallet, Ledger bridges, and any wallet supporting `personal_sign`.
-
-**Plan (v2, post-grant):** Upgrade to hybrid X25519 + ML-KEM-768 (NIST FIPS 203) for quantum
-resistance. The HKDF derivation is forward-compatible: v1 requests 32 bytes; v2 requests 96 bytes
-from the same derivation root. V1 ciphertexts remain decryptable after v2 is deployed. Because the
-AES copy is retained post-claim in v1, the server can re-encrypt each key for v2 without user
-burden — one `personal_sign` per token to submit the migrated ciphertext on-chain.
-
-**Scope (v1):** Frontend + API only. Zero contract changes required — `encryptedCdKey[tokenId]` is
-already typed `bytes` (variable length) in SoulKey.sol.
-
-**New dependency:** `pnpm add @noble/curves`
-
-**Implementation notes:**
-- Use all 65 signature bytes as HKDF IKM (`getBytes(sig)`, not `.slice(0, 32)`). Truncating
-  silently halves entropy and changes the derived keypair — existing ciphertexts become unreadable.
-  See GOTCHAS.md.
-- HKDF call: `hkdf(sha256, getBytes(sig), "soulkey-hybrid-v1", "", 32)` — note length=32 for v1
-  (X25519 only). The salt `"soulkey-hybrid-v1"` is shared with v2 for forward compatibility.
-- Cache the derived keypair in a `useRef` in `HomeClient.tsx`, cleared on wallet disconnect or
-  address change. Claim + immediate reveal = one `personal_sign` prompt per session.
-
-**Files to change:**
-- `nextjs/app/HomeClient.tsx` — replace `eth_getEncryptionPublicKey` (claim) and `eth_decrypt`
-  (reveal) with `personal_sign` + X25519 derive/decrypt; add `x25519KeypairRef` cache in `useRef`
-- `nextjs/utils/crypto.ts` — replace `encryptWithPublicKey()` with `encryptWithX25519()`; add
-  `decryptWithX25519()`; server AES path (`encrypt()`/`decrypt()`) is unchanged
-- `nextjs/app/api/redeem/route.ts` — accept `x25519PublicKey` instead of `userPublicKey`
-
-**Files to remove from confirm flow:**
-- `nextjs/app/api/redeem/confirm/route.ts` — remove the `clearEncryptedKey()` call (step 6).
-  The AES copy is retained in v1 as the v2 migration enabler. See DECISIONS.md —
-  *AES copy retained post-claim as v2 migration enabler*.
-
-**Tests to update:**
-- `HomeClient.claimCdKey.test.tsx` — `window.ethereum` mock changes from
-  `eth_getEncryptionPublicKey` to `personal_sign`; mock should return a deterministic 65-byte hex
-  string (e.g. `"0x" + "ab".repeat(32) + "01"`) so HKDF produces a consistent keypair across runs
+(none — the `eth_getEncryptionPublicKey` / `eth_decrypt` mainnet blocker is resolved: v1 X25519
+shipped, and v2 X-Wing (ML-KEM-768 + X25519) became the default claim cipher on 12/09/26.
+See Recently Resolved.)
 
 ---
 
@@ -86,6 +42,17 @@ still issue keys if the route is called directly with the deregistered contract'
 - ETH vs stablecoin refund — if ETH price changed between mint and refund, the ETH value returned
   may differ from what was paid in stablecoin terms. Known limitation, not a bug.
 
+### Claimed-then-refunded rows look available in DB (pre-existing edge)
+The availability filter (`refunded_at >= minted_at`) in `reserveCDKeyForWallet` /
+`reserveAndMint` / `getAvailableKeyCount` also matches keys refunded AFTER a confirmed claim.
+Such rows are unusable: on-chain `commitmentInUse` stays set for claimed burns (the 12/09/26
+mint-cap fix made this explicit), so a fresh mint with that commitment reverts
+`CommitmentAlreadyUsed`; and their `encrypted_key` is NULL anyway (deleted at confirm).
+get-commitment can hand out such a poisoned reservation, burning user gas on a reverting mint.
+**Fix:** exclude post-claim refunds from the availability queries (e.g. require
+`encrypted_key IS NOT NULL`, or drop rows with a confirmed redemption).
+**File:** `nextjs/utils/db.ts`
+
 ### import-keys — verify both paths use the same constraint
 Single key and batch import should both go through the same DB upsert with the UNIQUE constraint on
 `commitment_hash`. Verify neither path bypasses it.
@@ -95,26 +62,27 @@ Single key and batch import should both go through the same DB upsert with the U
 A script that re-encrypts all `cd_keys.encrypted_key` records when rotating the AES key has not
 been written or documented. Essential before mainnet — if the key is leaked, there is no path to
 rotate without this.
-**Note:** Rotation is distinct from the v2 encryption upgrade. This script addresses AES key
-compromise; v2 addresses the on-chain scheme upgrade.
+**Note:** Rotation is distinct from the on-chain claim scheme (X-Wing v2 shipped 12/09/26).
+This script addresses AES key compromise only. At-rest rows are now AES-256-GCM (`v2gcm:`
+prefix) with legacy CBC rows — a rotation script must decrypt BOTH formats and rewrite GCM.
+Rows of confirmed claims are already NULL (deleted at confirm) — nothing to rotate there.
 
-### Local dev environment: lint and production build broken (pre-existing)
-**Status:** Reproduces at a clean checkout of `main` — not caused by application code.
-- `pnpm lint` (nextjs): eslint-config-next cannot resolve `next/dist/compiled/babel/eslint-parser`
-  (broken peer link in the root-level pnpm store).
-- `pnpm build` (nextjs): `Module not found: Can't resolve '@x402/core/client'` (and siblings) —
-  optional deps of `@coinbase/cdp-sdk`, pulled in via RainbowKit → wagmi connectors →
-  `@base-org/account`. Trace runs through `admin/AdminClient.tsx`.
-**Root cause candidate:** deps are installed into an untracked root workspace
-(`pnpm-lock.yaml` / `pnpm-workspace.yaml` at repo root, not committed; `nextjs/` has no
-committed lockfile). A clean `pnpm install` inside `nextjs/` (and committing that lockfile)
-should fix both. Vercel deploys install independently — verify the deployed build still works.
-**Update (12/09, later same day):** the root store was pruned to the root package's two deps
-(`@openzeppelin/contracts`, `solidity-bytes-utils`); nextjs's top-level symlinks into it are now
-dangling, so local `pnpm test` / `pnpm build` / `pnpm lint` cannot run at all until the chore
-above is done. The root `pnpm-lock.yaml` / `pnpm-workspace.yaml` session leftovers were deleted
-(and gitignored). Last verified green: 63/63 tests + clean `tsc --noEmit` against the exact
-`feat/pending-tx-resume` tree before the prune.
+### Local dev environment — REPAIRED 12/09/26 (lint still red: pre-existing style errors)
+**Status:** Fixed during the crypto-and-supply work. The committed `nextjs/pnpm-lock.yaml` was
+stale relative to `package.json` (predated the X25519 switch), and the prior root-workspace
+store had been pruned, leaving dangling symlinks. Lockfile regenerated + reinstalled inside
+`nextjs/` (pnpm 11.7.0), committed as a chore.
+- `pnpm test` — green (81/81, 9 files). `pnpm build` — green again (the `@x402/*` failure was
+  the broken tree, not a real dep issue). `tsc --noEmit` — clean.
+- `pnpm lint` — runs now, but fails with ~78 pre-existing style errors
+  (`@typescript-eslint/no-explicit-any`, `react-hooks/set-state-in-effect`) across files
+  untouched by recent work. Separate cleanup chore; not a blocker.
+- Sandboxed-agent recipe (home pnpm store is read-only there):
+  `CI=true pnpm install --no-frozen-lockfile --store-dir ../.pnpm-store --cache-dir ../.pnpm-cache`
+  — delete the store dirs afterwards; node_modules keeps working (hardlinked inodes).
+- pnpm 11 drops a `nextjs/pnpm-workspace.yaml` "allowBuilds" stub after install — delete it
+  (junk). Native build scripts stay unapproved (bufferutil, esbuild, keccak, sharp,
+  unrs-resolver, utf-8-validate); tests and build work without them.
 
 ---
 
@@ -144,6 +112,8 @@ register/re-register form.
   deferred — out of scope for the refresh-resume work (12/09/26).
 - `SKILL_API_DB.md` points at `skills/references/GOTCHAS.md`, which never existed; bug history
   now lives in `docs/GOTCHAS.md` (stub) and the skills' own gotcha sections.
+- The skill docs' crypto sections are further outdated since X-Wing shipped (12/09/26) —
+  still deferred to a deliberate rewrite.
 
 ---
 
@@ -169,13 +139,6 @@ developers that bypasses the stake requirement.
 Imported keys enter `pending` state for 24h before becoming mintable, for developers without an
 established track record. Gives the Vault operator a review window without blocking activation.
 
-### Hybrid encryption upgrade (v2)
-After mainnet deployment and audit, upgrade the on-chain encryption from X25519 to hybrid
-X25519 + ML-KEM-768 (NIST FIPS 203). The HKDF derivation is forward-compatible with v1. The
-server re-encrypts each key using the retained AES copy; the user submits one `personal_sign` per
-token to commit the migrated ciphertext on-chain. AES copy is deleted after each token's
-successful v2 migration.
-
 ### Smart contract wallet (SCW) support for admin auth
 The Solidity contracts already work with SCWs (all ownership checks are address-only). V2 adds
 ERC-1271 + ERC-6492 signature verification to the `/api/admin/verify` SIWE route, enabling Safe,
@@ -191,8 +154,8 @@ API routes, and on-chain storage are unchanged. No contract redeployment require
 until at least two major wallets ship it.
 
 ### ZK claim proof (gas reduction)
-ZK proofs for on-chain ciphertext reduction were evaluated and deferred. Blocked by the planned v2
-ML-KEM-768 component: ZK circuits operate over prime fields (BN254, BLS12-381) and ML-KEM's
+ZK proofs for on-chain ciphertext reduction were evaluated and deferred. Blocked by the
+ML-KEM-768 component (shipped 12/09/26 inside the X-Wing v2 cipher): ZK circuits operate over prime fields (BN254, BLS12-381) and ML-KEM's
 polynomial arithmetic over `q = 3329` does not map to these without expensive emulation. Revisit
 when ZK-friendly post-quantum primitives exist in production. See DECISIONS.md — *ZK proofs:
 deferred*.
@@ -213,9 +176,14 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
 - [x] Key deletion atomicity fixed
 - [x] Pinata failure handling fixed (non-fatal, correct column names)
 - [x] SIWE admin auth implemented (iron-session + viem/siwe, 35 tests)
-- [x] Vitest test suite — 6 test files, 35+ tests
-- [ ] **Replace eth_getEncryptionPublicKey / eth_decrypt with personal_sign + X25519 (v1)**
-- [ ] **Remove clearEncryptedKey from confirm flow (AES copy retained for v2)**
+- [x] Vitest test suite — 9 test files, 81 tests
+- [x] Replace eth_getEncryptionPublicKey / eth_decrypt — v1 X25519 shipped; v2 X-Wing is the
+      default claim cipher (12/09/26)
+- [x] ~~Remove clearEncryptedKey from confirm flow~~ REVERSED 12/09/26 — clearEncryptedKey
+      restored; confirmed claims delete the AES copy, failed claims keep it
+- [ ] Redeploy game contracts for the mint-cap fix — Sepolia bytecode is immutable; the
+      lifetime-mints-minus-refund-burns gate only applies to NEW deployments
+- [ ] Verify claim gas on Sepolia with the ~1.15 KB X-Wing blob (~800k gas expected per claim)
 - [ ] Deregistered game mint guard in get-commitment route
 - [ ] Dynamic NFT metadata endpoint (unclaimed JSON)
 - [ ] Chain sync event listener (Milestone 3)
@@ -227,6 +195,20 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
 
 ## Recently Resolved
 
+- ✅ X-Wing v2 claim cipher shipped — ML-KEM-768 + X25519 via `@noble/post-quantum` 0.7.1
+  (pinned); on-chain blob `0x02 || xwingCt(1120) || nonce(12) || tag(16) || aesCt` (~1.15 KB);
+  seed = HKDF-SHA256(full 65-byte personal_sign, salt "soulkey-xwing-v2", 32 B); reveal
+  dual-reads v1; supersedes the April HKDF-96 hybrid plan (12/09/26)
+- ✅ Confirmed claims delete `cd_keys.encrypted_key` — `clearEncryptedKey` restored as the last
+  `/api/redeem/confirm` step (receipt success + claimTimestamp>0 + confirmRedemption); failed
+  claims keep the row; no v1→v2 migration, first public deploy is production (12/09/26)
+- ✅ AES-256-GCM at rest for `cd_keys.encrypted_key` — `v2gcm:iv:ct:tag` writes, legacy
+  `ivHex:ctHex` CBC rows still decrypt, tamper throws (12/09/26)
+- ✅ Mint-cap accounting fixed — gate = lifetime mints minus unclaimed refund burns
+  (`_refundBurnedCount`); claimed burns no longer free slots; `setMaxSupply` uses the same
+  figure; Foundry tests added (forge not run locally) (12/09/26)
+- ✅ Local dev environment repaired — lockfile regenerated, node_modules rebuilt; test + build
+  green, lint runs with pre-existing style errors (12/09/26)
 - ✅ In-flight mint/claim/refund survive a page refresh — sessionStorage pending-tx record
   (`utils/pendingTx.ts`) + resume-on-load effect in HomeClient completes the missing DB write
   from the tx receipt; `/api/refund` made idempotent on refund_tx_hash; reverted refunds are no
@@ -237,6 +219,7 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
 - ✅ Encryption architecture decision finalised — v1 uses X25519 (personal_sign + HKDF);
   v2 upgrades to hybrid X25519 + ML-KEM-768 post-audit; AES copy retained post-claim as migration
   enabler; clearEncryptedKey removed from v1 confirm flow (28/04/26)
+  *(superseded 12/09/26: X-Wing shipped pre-grant; AES copy deleted post-confirm)*
 - ✅ ESP grant application finalised — CodeHawks audit as Milestone 2; v1/v2 roadmap documented;
   $18,000 total (28/04/26)
 - ✅ Admin auth upgraded to SIWE (EIP-4361) — `viem/siwe` + `iron-session`; one sign-in per

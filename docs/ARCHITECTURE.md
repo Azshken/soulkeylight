@@ -88,7 +88,7 @@ Locked
 ```
 products (image_cid, image_claimed_cid)
   └── batches
-        └── cd_keys (reserved_by → cleared after mint; encrypted_key → RETAINED after claim)
+        └── cd_keys (reserved_by → cleared after mint; encrypted_key → DELETED after confirmed claim)
               └── mints (cdkey_id UNIQUE — one mint per key)
                     └── redemptions (cdkey_id UNIQUE — one claim per key; frozen_metadata_cid)
                     └── refunds
@@ -123,21 +123,21 @@ Pinata regardless. Currently set via direct SQL in Neon (no admin UI).
 fewer RPC calls. Risk: can go out of sync if users interact with contract directly (no event
 listener yet — see OPEN_ISSUES).
 
-**`cd_keys.encrypted_key` — retained after claim (not deleted)** — the AES-256 server-side copy
-is deliberately kept after `claimCdKey` confirms on-chain. This is the v2 migration enabler: when
-the encryption scheme is upgraded to hybrid X25519 + ML-KEM-768, the server can re-encrypt each
-key using the AES copy and present the new ciphertext to the user for a single on-chain update —
-no decrypt-burden falls on the user, and no user cooperation is required at migration time. The
-AES copy is cleared only after a successful v2 hybrid re-encryption. See DECISIONS.md —
-*AES copy retained post-claim as v2 migration enabler*.
+**`cd_keys.encrypted_key` — deleted after a CONFIRMED claim (12/09/26, supersedes retention)** —
+`clearEncryptedKey` runs as the very last step of `/api/redeem/confirm`, only after
+receipt.status === success AND getClaimTimestamp > 0 AND confirmRedemption committed. Any failure
+returns earlier and KEEPS the row. There is no v1→v2 migration: X-Wing is the default claim
+cipher from the first deploy that ships it, and the first public deploy is production. See
+DECISIONS.md — *12/09/26 — Crypto v2 (X-Wing) & supply cap*.
 
 ## Encryption Architecture
 
 The encrypted CD key is written **permanently on-chain** at claim time (`encryptedCdKey[tokenId]`).
-The choice of encryption scheme has **lifetime consequences** for every claimed token — migration
-to a stronger scheme must be planned from the start.
+The choice of encryption scheme has **lifetime consequences** for every claimed token — there is no
+on-chain migration function, so a token stays on the scheme it was claimed with. New claims write
+v2 (X-Wing); v1 blobs stay readable forever via client-side dual-read.
 
-### v1 Scheme: X25519 (personal_sign + HKDF)
+### v1 Scheme: X25519 (personal_sign + HKDF) — legacy, decrypt-only
 
 All cryptographic operations run in the browser using `@noble/curves`. The wallet's only role is
 `personal_sign` — no special wallet support is required, and no deprecated MetaMask APIs
@@ -156,9 +156,9 @@ HKDF-SHA256(IKM = sigBytes[0..65], salt = "soulkey-hybrid-v1", length = 32)
        └── [0..32] → X25519 secret key → X25519 public key (32 bytes)
 ```
 
-Note: the salt `"soulkey-hybrid-v1"` and a 32-byte output are intentional for forward
-compatibility — v2 requests 96 bytes from the same derivation to add the ML-KEM-768 seed, and no
-existing v1 ciphertext is invalidated by this extension.
+Note: the former plan to extend this derivation to 96 bytes for v2 is **superseded** (12/09/26).
+V2 uses a separate HKDF derivation with salt `"soulkey-xwing-v2"` and a 32-byte X-Wing seed — the
+same `personal_sign`, a different salt, no shared expansion. V1 ciphertexts are unaffected.
 
 **Encryption (server, `/api/redeem`):**
 ```
@@ -185,28 +185,44 @@ for classical adversaries. This removes all deprecated MetaMask API dependency a
 compatibility to the full EOA ecosystem.
 
 **On-chain storage:** `encryptedCdKey[tokenId]` is typed `bytes` (variable length) — the contract
-accepts the v1 ciphertext (~60 bytes) and the future v2 ciphertext (~1,168 bytes) with no changes.
+accepts the v1 ciphertext (~60 bytes) and the v2 X-Wing ciphertext (~1.15 KB) with no changes.
 
-### v2 Scheme: Hybrid X25519 + ML-KEM-768 (post-grant)
+### v2 Scheme: X-Wing (ML-KEM-768 + X25519) — shipped 12/09/26
 
-After v1 mainnet deployment and audit, the encryption scheme will be upgraded to hybrid
-X25519 + ML-KEM-768 (NIST FIPS 203). This is the same pattern deployed in TLS 1.3 by Google, Go,
-and Java. Breaking a v2 ciphertext requires breaking both X25519 (hard classically) and ML-KEM-768
-(no known classical or quantum attack) simultaneously.
+New claims write X-Wing ciphertext (the ML-KEM-768 + X25519 hybrid) via `@noble/post-quantum`
+**0.7.1, pinned exactly** — export `ml_kem768_x25519` (the descriptive name for X-Wing in
+0.7.1+). No homemade hybrid construction; no HQC, no McEliece. Breaking a v2 blob requires
+breaking both X25519 (hard classically) and ML-KEM-768 (no known classical or quantum attack)
+simultaneously.
 
-Because the v1 AES copy is retained server-side, this migration requires only one user-signed
-transaction per token: the server prepares the new hybrid ciphertext using the AES copy, and the
-user submits a single `personal_sign` to derive the expanded v2 keypair (96-byte HKDF output) and
-call a migration function on-chain. No decrypt-and-re-encrypt burden falls on the user.
-
-**v2 key derivation** extends v1 by requesting 96 bytes from the same derivation:
+**Key derivation (client)** — the same single `personal_sign` as v1, different HKDF salt:
 ```
-HKDF-SHA256(IKM = sigBytes[0..65], salt = "soulkey-hybrid-v1", length = 96)
-  ├── [0..32]  → X25519 secret key
-  └── [32..96] → ML-KEM-768 seed → ML-KEM-768 keypair (pk: 1,184 bytes | sk: 2,400 bytes)
+HKDF-SHA256(IKM = sigBytes[0..65], salt = "soulkey-xwing-v2", length = 32)
+  → 32-byte X-Wing seed → ml_kem768_x25519.keygen(seed)
+     (pk: 1,216 bytes | sk: the seed itself — the KEM re-expands internally)
 ```
+The superseded April plan (length = 96 from the v1 salt) is dead: X-Wing expands its own seed,
+and the distinct salt domain-separates the two schemes from the one signature.
 
-v2 on-chain ciphertext: `[ephX25519Pk(32)][mlKemCt(1088)][nonce(12)][aesCt(n+16)]` ≈ 1,168 bytes.
+**Encryption (server, `/api/redeem`):**
+```
+{cipherText, sharedSecret} = ml_kem768_x25519.encapsulate(userXWingPk)
+aesCt = AES-256-GCM(key = sharedSecret(32B), nonce(12B), plaintextCdKey)
+
+on-chain bytes: [version 0x02][xwingCt(1120)][nonce(12)][tag(16)][aesCt]  ≈ 1.15 KB
+```
+The shared secret IS the AES key — X-Wing's SHA3-256 combiner already KDFs both component
+secrets, so no extra HKDF runs here.
+
+**Decryption (client, reveal):** `utils/xwing.ts` dual-reads: v2 (0x02-prefixed) →
+`ml_kem768_x25519.decapsulate` + WebCrypto AES-GCM; v1 (unprefixed) → the legacy X25519 path.
+Version detection is length-based (v2 is always ≥ 1,150 bytes) because a v1 blob's random
+ephemeral public key can start with any byte, including 0x02. No writer ever emits an explicit
+0x01 prefix.
+
+**No migration:** confirmed claims delete the Neon AES copy (see Database Architecture) and no
+`updateEncryptionKey` exists, so every token stays on the scheme it was claimed with. Sepolia
+v1 tokens remain revealable forever through the client-side dual-read.
 
 ### Future: EIP-5630
 
@@ -221,7 +237,7 @@ Zero-knowledge proofs were evaluated as a potential enhancement. The primary can
 claim proof: replacing the full on-chain ciphertext with a short ZK proof (~256 bytes vs ~1,168
 bytes in v2), reducing `claimCdKey` gas significantly.
 
-This is blocked by the planned v2 ML-KEM-768 component. ZK circuits operate over large prime
+This is blocked by the ML-KEM-768 component (shipped 12/09/26 inside the X-Wing v2 cipher). ZK circuits operate over large prime
 fields (BN254, BLS12-381). ML-KEM-768's polynomial arithmetic over `q = 3329` does not map to
 these fields without expensive emulation — a research-level problem with no production circuit
 available. Revisit when ZK-friendly post-quantum primitives exist in production. See DECISIONS.md
@@ -247,15 +263,14 @@ POST /api/mint/link-token
 
 ### Claim Flow
 ```
-POST /api/redeem  { x25519PublicKey, tokenId, userAddress, contractAddress }
+POST /api/redeem  { xwingPublicKey, x25519PublicKey (legacy), tokenId, userAddress, contractAddress }
   → Verify NFT ownership (on-chain ownerOf call)
-  → AES-256 decrypt CD key server-side
-  → X25519 ECDH encrypt:
-      ephemeral X25519 key pair → shared secret → HKDF → AES-256-GCM
-      returns ~60 byte ciphertext
+  → AES-256 decrypt CD key server-side ("v2gcm:" GCM rows + legacy CBC rows)
+  → X-Wing encapsulate to the user's 1,216-byte pk → shared secret → AES-256-GCM:
+      returns ~1.15 KB v2 ciphertext (0x02-prefixed)
+      (legacy cached clients sending only x25519PublicKey still get the ~60 B v1 blob)
   → INSERT partial redemption row (wallet_encrypted_cdkey only)
   → Return ciphertext to frontend
-  → AES copy in cd_keys.encrypted_key RETAINED (v2 migration enabler)
 
 [User calls claimCdKey on-chain with ciphertext]
   → Vault releases reserve atomically
@@ -269,7 +284,9 @@ POST /api/redeem/confirm
   Step 4: Pinata upload → frozen_metadata_cid saved to redemptions. Non-fatal:
           wrapped in try/catch. Uses image_claimed_cid ?? image_cid.
   Step 5: recordReserveRelease() — audit log entry.
-  Note: cd_keys.encrypted_key is NOT deleted. AES copy retained for v2 migration.
+  Step 6: clearEncryptedKey() — deletes the cd_keys AES copy. LAST step: only
+          reached when steps 1–3 all succeeded; every failure path returns
+          earlier and keeps the row for retry/resume. Idempotent.
 ```
 
 ### Refund Flow
@@ -282,6 +299,9 @@ POST /api/redeem/confirm
 POST /api/refund
   → INSERT into refunds table
   → cd_key becomes available again (db.ts checks refunds table)
+  Note: only UNCLAIMED refund burns free an on-chain mint slot (commitmentInUse
+  cleared); claimed burns never do. See OPEN_ISSUES for the claimed-then-refunded
+  availability edge.
 ```
 
 ### Admin Auth — SIWE (EIP-4361)
@@ -313,17 +333,23 @@ GET /api/nft/[contractAddress]/[tokenId]
 
 ## Frontend Architecture
 
-- `app/page.tsx` + `HomeClient.tsx` — game selector (hero section) + user library. Contains
-  inline X25519 encryption/decryption logic in `handleClaimCDKey` and `handleRevealCDKey`:
-  `personal_sign` → HKDF (full 65-byte IKM, 32-byte output) → X25519 keypair derivation +
-  AES-256-GCM decrypt. Keypair cached in `useRef`, cleared on wallet disconnect or address change.
+- `app/page.tsx` + `HomeClient.tsx` — game selector (hero section) + user library.
+  `handleClaimCDKey` / `handleRevealCDKey` run `deriveClaimKeys`: ONE `personal_sign` → HKDF
+  (full 65-byte IKM) → BOTH keypairs — v1 X25519 (salt `soulkey-hybrid-v1`, legacy reveals) and
+  the v2 X-Wing seed/pk (salt `soulkey-xwing-v2`, new claims). Cached in `useRef`, cleared on
+  wallet disconnect or address change. Reveal goes through `decryptClaimCiphertextWebCrypto`
+  (dual-read v1/v2, WebCrypto AES-GCM).
 - `app/admin/page.tsx` + `AdminClient.tsx` — SIWE sign-in gate, register game, import keys
   (single/batch), deregister game
 - `components/Providers.tsx` — WagmiProvider + QueryClientProvider + RainbowKitProvider
 - `utils/abis.ts` — single source of truth for SoulKey and MasterKeyVault ABIs
 - `utils/adminSession.ts` — iron-session config + `requireAdminSession()` guard
-- `utils/crypto.ts` — `encryptWithX25519()` (server, `/api/redeem`), `decryptWithX25519()` (client,
-  reveal), `encrypt()`/`decrypt()` (server AES path for cd_keys storage, unchanged)
+- `utils/crypto.ts` — server-side: `encrypt()`/`decrypt()` for cd_keys at-rest (AES-256-GCM
+  `v2gcm:` writes + legacy CBC dual-read), `encryptWithXWing()` (v2 claim write path),
+  `encryptWithX25519()`/`decryptWithX25519()` (legacy v1)
+- `utils/x25519.ts` — browser-side v1: HKDF derive from personal_sign, WebCrypto decrypt
+- `utils/xwing.ts` — browser + Node v2: X-Wing seed derivation, keygen/encapsulate/decapsulate
+  wrappers, WebCrypto reveal decrypt, length-based version detection, dual-read dispatcher
 - `utils/helpers.ts` — `toBytes32`, `toHexBytes` — shared between component and tests
 - wagmi v2 + RainbowKit (not scaffold-ETH). Direct viem calls.
 
@@ -348,8 +374,9 @@ Wagmi hooks and `window.ethereum` are fully mocked; no RPC calls made. Covers:
 - Loading state: spinner visible while tx is pending
 
 The `window.ethereum` mock uses `personal_sign` (not `eth_getEncryptionPublicKey`). The mock
-should return a deterministic 65-byte hex string (e.g. `"0x" + "ab".repeat(32) + "01"`) so HKDF
-produces a consistent X25519 keypair across test runs.
+should return a deterministic 65-byte hex string (e.g. `"0x" + "ab".repeat(64) + "01"` —
+`"ab".repeat(32)` is only 33 bytes and HKDF rejects it) so both derivations produce consistent
+keypairs across test runs.
 
 ### Admin auth tests (`__tests__/admin/`)
 iron-session, viem, and all DB calls are mocked. Covers:
@@ -364,6 +391,20 @@ iron-session, viem, and all DB calls are mocked. Covers:
 
 ### Helper unit tests (`utils/helpers.test.ts`)
 Pure unit tests for `toBytes32` and `toHexBytes`.
+
+### Refresh-resume tests (`HomeClient.resume.test.tsx`)
+PendingTx record lifecycle (saved at txHash, cleared on server success, kept on confirm
+failure), resume per kind from the tx receipt, wallet-mismatch skip, reverted-resume clear,
+timeout keeps the record.
+
+### Crypto unit tests (`utils/crypto.test.ts`, `utils/xwing.test.ts`)
+At-rest AES-256-GCM: `v2gcm:` wire shape, roundtrip, fresh IV per call, ct/tag/IV nibble
+tamper each throw, malformed wire throws, legacy CBC fixture decrypts.
+X-Wing: seed determinism + salt domain separation + 65-byte IKM guard, exact v2 blob layout
+(`0x02 || ct(1120) || nonce(12) || tag(16) || aesCt`), server→client WebCrypto roundtrip,
+AES-GCM and X-Wing nibble tamper rejection, v1 dual-read, length-based version disambiguation.
+
+Suite total: 81 tests / 9 files.
 
 The revert test in `HomeClient` and the "nonce always consumed" test in `verify.test.ts` are the
 two critical regression tests — both exist specifically to catch accidental removal of their
@@ -397,7 +438,7 @@ multi-publisher platform, making structural changes that the current contracts a
 - Remaining risk is pre-mint inventory fraud (importing invalid keys before any mints). The
   staking mechanism + guardian pause + delayed key activation covers the practical attack surface.
 
-**Encryption upgrade path to v2 hybrid:**
-Because v1 retains the AES server copy post-claim, the migration to hybrid X25519 + ML-KEM-768
-requires only one `personal_sign` per token from the user — the server re-encrypts invisibly using
-the AES copy and presents the new ciphertext ready to submit.
+**Encryption:** the post-grant "hybrid migration" is superseded (12/09/26): X-Wing
+(ML-KEM-768 + X25519) shipped as the default claim cipher. No v1→v2 migration exists —
+confirmed claims delete the Neon AES copy, and every token stays on the scheme it was claimed
+with (client-side dual-read keeps Sepolia v1 blobs revealable). See *Encryption Architecture*.
