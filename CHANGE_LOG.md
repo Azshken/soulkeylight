@@ -56,7 +56,7 @@
 - Added nextjs tests
 - Deleted CDKeyEncryption.ts component it was an relic from previous implementations
 
-01/03/26
+01/04/26
 
 - Changed viem.verifyMessage to SIWE
 - Added tests
