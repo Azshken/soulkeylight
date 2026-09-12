@@ -9,6 +9,7 @@ import {
   parseX25519Ciphertext,
   x25519SharedSecret,
 } from "./x25519";
+import { XWING_PK_BYTES, XWING_VERSION_BYTE, xwingEncapsulate } from "./xwing";
 
 const ENCRYPTION_KEY = Buffer.from(
   process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString("hex"),
@@ -81,7 +82,10 @@ export function decrypt(encryptedData: string): string {
 }
 
 /**
- * On-chain v1 ciphertext: ephPk(32) | nonce(12) | aesCt | tag(16)
+ * LEGACY on-chain v1 ciphertext: ephPk(32) | nonce(12) | aesCt | tag(16).
+ * Kept only for deploy-skew (cached pre-X-Wing frontends still send a 32-byte
+ * X25519 key). New claims go through encryptWithXWing. v1 blobs remain
+ * decryptable at reveal forever (dual-read in utils/xwing.ts).
  * Returns 0x-prefixed hex for claimCdKey(bytes).
  */
 export function encryptWithX25519(plaintext: string, userX25519PublicKeyHex: string): string {
@@ -108,3 +112,27 @@ export function decryptWithX25519(ciphertextHex: string, userX25519SecretKeyHex:
   decipher.setAuthTag(Buffer.from(tag));
   return Buffer.concat([decipher.update(Buffer.from(ct)), decipher.final()]).toString("utf8");
 }
+/**
+ * On-chain v2 (X-Wing) ciphertext — the default for all new claims:
+ *   version(0x02) || xwing_ct(1120) || nonce(12) || tag(16) || aes_ct
+ * The AES-256-GCM key is the 32-byte X-Wing shared secret used directly:
+ * X-Wing already KDFs both component secrets through its SHA3-256 combiner.
+ * Returns 0x-prefixed hex for claimCdKey(bytes) — ~1150+ plaintext bytes.
+ */
+export function encryptWithXWing(plaintext: string, userXWingPublicKeyHex: string): string {
+  const userPk = hexToExactBytes(userXWingPublicKeyHex, XWING_PK_BYTES);
+  const { cipherText, sharedSecret } = xwingEncapsulate(userPk);
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(sharedSecret), nonce);
+  const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const blob = Buffer.concat([
+    Buffer.from([XWING_VERSION_BYTE]),
+    Buffer.from(cipherText),
+    nonce,
+    tag,
+    ct,
+  ]);
+  return `0x${blob.toString("hex")}`;
+}
+

@@ -8,7 +8,7 @@ import { hexToBytes, toHex } from "viem";
 export const HKDF_SALT = new TextEncoder().encode("soulkey-hybrid-v1");
 
 /** WebCrypto BufferSource requires ArrayBuffer, not SharedArrayBuffer-backed views. */
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
