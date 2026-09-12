@@ -109,7 +109,12 @@ compromise; v2 addresses the on-chain scheme upgrade.
 (`pnpm-lock.yaml` / `pnpm-workspace.yaml` at repo root, not committed; `nextjs/` has no
 committed lockfile). A clean `pnpm install` inside `nextjs/` (and committing that lockfile)
 should fix both. Vercel deploys install independently — verify the deployed build still works.
-**Untouched for now:** `tsc --noEmit` and the full vitest suite both pass and are the working gates.
+**Update (12/09, later same day):** the root store was pruned to the root package's two deps
+(`@openzeppelin/contracts`, `solidity-bytes-utils`); nextjs's top-level symlinks into it are now
+dangling, so local `pnpm test` / `pnpm build` / `pnpm lint` cannot run at all until the chore
+above is done. The root `pnpm-lock.yaml` / `pnpm-workspace.yaml` session leftovers were deleted
+(and gitignored). Last verified green: 63/63 tests + clean `tsc --noEmit` against the exact
+`feat/pending-tx-resume` tree before the prune.
 
 ---
 
@@ -131,6 +136,14 @@ is no longer active on the storefront (e.g. greyed out name, "Delisted" badge).
 Currently set via direct SQL in Neon console. Should be an optional field in the admin
 register/re-register form.
 **Files:** `nextjs/app/admin/AdminClient.tsx`, `nextjs/app/api/admin/register-game/route.ts`
+
+### Stale references in docs/skills/*
+- `SKILL_FRONTEND.md` still documents the pre-v1 MetaMask encryption scheme
+  (`eth_getEncryptionPublicKey` / `eth_decrypt`, `CDKeyEncryption.tsx` — component deleted
+  31/03/26); v1 is personal_sign + HKDF + X25519 (`utils/x25519.ts`). Rewrite deliberately
+  deferred — out of scope for the refresh-resume work (12/09/26).
+- `SKILL_API_DB.md` points at `skills/references/GOTCHAS.md`, which never existed; bug history
+  now lives in `docs/GOTCHAS.md` (stub) and the skills' own gotcha sections.
 
 ---
 
