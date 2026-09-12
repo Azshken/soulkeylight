@@ -248,6 +248,7 @@ Refactoring the code:
   - /api/refund idempotent on refund_tx_hash; reverted refunds no longer recorded in the DB (was a live bug)
 - Fixed the 4 failing claim tests — the personal_sign mock was 33 bytes, the X25519 derivation demands the full 65
 - 63/63 tests green, tsc clean. Lint and production build fail identically at HEAD — broken root pnpm store (eslint-config-next peer link; missing @x402/* deps of @coinbase/cdp-sdk), not related to these changes
+
 12/09/26 (crypto & supply)
 
 - Shipped post-quantum claims NOW instead of post-grant: X-Wing (ML-KEM-768 + X25519) is the
@@ -263,8 +264,7 @@ Refactoring the code:
   silently freed slots the chain never frees (commitmentInUse stays set). Gate = lifetime mints
   minus refund burns now. Sepolia bytecode is immutable — lands with the next deployment.
 - Env: regenerated the stale nextjs lockfile, rebuilt node_modules — build green again, 81/81
-  tests, tsc clean. forge still not installed locally, so the Solidity tests are written but
-  unrun here.
+  tests, tsc clean. forge test on Fedora: 98/98.
 
 Notes:
 

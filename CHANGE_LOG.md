@@ -71,3 +71,25 @@
 - Fixed: reverted mint tx now reports a clear error instead of "Could not extract token ID"
 - Fixed: claim-flow test mock now returns a real 65-byte personal_sign signature (was 33 bytes — 4 tests failing at baseline); CLAUDE.md example corrected
 - Added __tests__/HomeClient.resume.test.tsx — 11 tests (record lifecycle, resume per kind, wallet mismatch, revert, timeout). Suite: 63 tests / 7 files
+
+12/09/26 — crypto & supply (feat/crypto-and-supply)
+
+- Mint cap fixed in SoulKey.sol: gate now counts lifetime mints minus UNCLAIMED refund burns
+  (_refundBurnedCount); burning a claimed token no longer frees a slot (totalSupply() used to
+  subtract it while commitmentInUse stayed set). setMaxSupply lower bound uses the same figure.
+  Existing Sepolia bytecode is immutable — future deployments only. Foundry: 98/98 including the
+  new mint-cap tests.
+- Neon at-rest encryption: new cd_keys.encrypted_key writes are AES-256-GCM
+  ("v2gcm:iv:ct:tag"); legacy ivHex:ctHex CBC rows still decrypt; tamper throws. Same
+  ENCRYPTION_KEY, no rotation, no rewrite job.
+- Confirmed claims now DELETE cd_keys.encrypted_key — clearEncryptedKey restored as the last
+  /api/redeem/confirm step (after receipt success + claimTimestamp>0 + confirmRedemption).
+  Failed claims keep the row. No v1→v2 migration; first public deploy is production.
+- On-chain claim ciphertext v2 = X-Wing (ML-KEM-768 + X25519) via @noble/post-quantum 0.7.1
+  (pinned): 0x02 || xwingCt(1120) || nonce(12) || tag(16) || aesCt, AES-256-GCM keyed by the
+  32-byte X-Wing shared secret. Seed = HKDF-SHA256(full 65-byte personal_sign, salt
+  "soulkey-xwing-v2", 32). Reveal dual-reads v1/v2; one personal_sign derives both keypairs.
+  /api/redeem prefers xwingPublicKey, still accepts legacy x25519PublicKey (deploy skew).
+- Supersedes DECISIONS.md (April): HKDF length-96 v2 expansion and AES-copy retention are dead.
+- Local env repaired: nextjs pnpm-lock.yaml regenerated (was stale), build green again,
+  81/81 tests (9 files) + tsc clean.
