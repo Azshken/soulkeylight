@@ -368,6 +368,15 @@ export async function confirmRedemption(params: {
   }
 }
 
+// Called explicitly as the very last step in confirm/route.ts — only after the
+// receipt succeeded, getClaimTimestamp > 0 on-chain, and confirmRedemption
+// committed. Every failure path returns before this runs, so a failed claim
+// always KEEPS the row. There is no v1→v2 migration: once the claim is
+// confirmed, the on-chain ciphertext is the only surviving copy of the key.
+export async function clearEncryptedKey(cdkeyId: number): Promise<void> {
+  await sql`UPDATE cd_keys SET encrypted_key = NULL WHERE id = ${cdkeyId}`;
+}
+
 export async function recordReserveRelease(params: {
   cdkeyId: number;
   releaseReason: "claim" | "expiry";

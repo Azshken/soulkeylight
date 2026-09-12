@@ -5,7 +5,7 @@ import { sql } from '@vercel/postgres';
 import { createPublicClient, http, getAddress } from 'viem';
 import { sepolia } from 'viem/chains';
 import { SOULKEY_ABI } from '@/utils/abis';
-import { confirmRedemption, recordReserveRelease } from '@/utils/db';
+import { clearEncryptedKey, confirmRedemption, recordReserveRelease } from '@/utils/db';
 
 export async function POST(req: NextRequest) {
   try {
@@ -108,7 +108,13 @@ export async function POST(req: NextRequest) {
       blockNumber: BigInt(blockNumber),
     });
 
-    // AES copy in cd_keys.encrypted_key is RETAINED for the v2 hybrid migration.
+    // ── Last step: delete the server-side AES copy ─────────────────────────────
+    // Only reached after receipt.status === 'success', getClaimTimestamp > 0 and
+    // confirmRedemption succeeded; every failure path returned early above and
+    // left encrypted_key untouched. No v1→v2 migration exists — the on-chain
+    // ciphertext is the only copy after a confirmed claim. Idempotent: a retried
+    // confirm simply re-nulls the already-NULL column.
+    await clearEncryptedKey(Number(cdkeyId));
 
     return NextResponse.json({ success: true });
   } catch (error: any) {
