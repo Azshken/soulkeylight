@@ -1,7 +1,7 @@
 # SoulKey — Claude Code Briefing
 
 > Auto-loaded by Claude Code every session. Keep concise and current.
-> Last updated: 2026-04-28
+> Last updated: 2026-09-12
 
 ## What This Project Is
 
@@ -65,7 +65,8 @@ soulkeylight/
     │   │   └── auth-guard.test.ts        # 401/403 on all protected routes
     │   ├── utils/
     │   │   └── helpers.test.ts           # toBytes32 / toHexBytes unit tests
-    │   └── HomeClient.claimCdKey.test.tsx # claim flow integration tests
+    │   ├── HomeClient.claimCdKey.test.tsx # claim flow integration tests
+    │   └── HomeClient.resume.test.tsx    # refresh-resume lifecycle for in-flight txs
     ├── app/
     │   ├── admin/
     │   │   ├── AdminClient.tsx
@@ -106,7 +107,9 @@ soulkeylight/
         ├── adminSession.ts           # iron-session config + requireAdminSession()
         ├── crypto.ts                 # encryptWithX25519, decryptWithX25519, encrypt, hashCDKey
         ├── db.ts                     # all DB queries
-        └── helpers.ts                # toBytes32, toHexBytes — shared across component + tests
+        ├── helpers.ts                # toBytes32, toHexBytes — shared across component + tests
+        ├── pendingTx.ts              # sessionStorage record for in-flight txs (refresh resume)
+        └── x25519.ts                 # browser X25519: HKDF derive from personal_sign, WebCrypto decrypt
 ```
 
 ## Smart Contracts
@@ -175,6 +178,11 @@ reserve_releases — audit log of reservation releases
 8. (Optional) Refund within 14 days → POST /api/refund records in DB
 ```
 
+**Refresh safety:** every on-chain write stores a PendingTx record (`utils/pendingTx.ts`) from the
+moment the wallet returns a txHash until its DB write lands. On next page load HomeClient resumes
+unfinished records from the tx receipt. `/api/refund` is idempotent on `refund_tx_hash`, like
+link-token on `mint_tx_hash`.
+
 ## Encryption Summary (v1)
 
 The deprecated `eth_getEncryptionPublicKey` / `eth_decrypt` are replaced with X25519 derived from
@@ -237,12 +245,14 @@ pnpm test        # run once
 pnpm test:watch  # watch mode
 ```
 
-Tests in `nextjs/__tests__/`. 35 admin auth tests + claim flow integration tests + helpers unit
-tests. Wagmi hooks and `window.ethereum` fully mocked — no wallet or DB needed.
+Tests in `nextjs/__tests__/`. 63 tests: 35 admin auth + claim flow + refresh-resume lifecycle
+(HomeClient.resume.test.tsx) + helpers unit tests. Wagmi hooks and `window.ethereum` fully
+mocked — no wallet or DB needed.
 
 When updating `HomeClient.claimCdKey.test.tsx` for the new encryption scheme, the
 `window.ethereum` mock uses `personal_sign` (not `eth_getEncryptionPublicKey`). The mock
-should return a deterministic 65-byte hex string (e.g. `"0x" + "ab".repeat(32) + "01"`) so HKDF
+should return a deterministic 65-byte hex string (e.g. `"0x" + "ab".repeat(64) + "01"` — 64
+bytes of `ab` plus the recovery byte; `"ab".repeat(32)` is only 33 bytes and HKDF rejects it) so HKDF
 produces a consistent X25519 keypair across test runs.
 
 ## Docs

@@ -231,6 +231,14 @@ Refactoring the code:
 - Swapped the viem.verigyMessage to SIWE authentication -> tighter security
 - Added tests
 
+12/09/26
+
+- Rebuilt the refresh-resume feature properly after the last attempt mangled HomeClient (1317-line deletion, manually reverted 06/09):
+  - pendingTx.ts wired into mint/claim/refund; a resume effect finishes the missing DB step from the tx receipt on next page load
+  - /api/refund idempotent on refund_tx_hash; reverted refunds no longer recorded in the DB (was a live bug)
+- Fixed the 4 failing claim tests — the personal_sign mock was 33 bytes, the X25519 derivation demands the full 65
+- 63/63 tests green, tsc clean. Lint and production build fail identically at HEAD — broken root pnpm store (eslint-config-next peer link; missing @x402/* deps of @coinbase/cdp-sdk), not related to these changes
+
 Notes:
 
 - This type of learning suits me the best (vibe coding). I have ideas in my head and no years of expertise. I can't learn for the sake of learning I hit a wall (because there is so much to know), get quickly demotivated and lose my goal by learning bloat that I may or may not use for my project ideas. With vibe coding I do, then fill up the gaps of knowledge by understanding how the pieces connect and how they work; step by step.
