@@ -64,8 +64,12 @@ soulkeylight/
     │   │   ├── nonce.test.ts             # nonce generation + session storage
     │   │   ├── verify.test.ts            # full SIWE verify gauntlet
     │   │   └── auth-guard.test.ts        # 401/403 on all protected routes
+    │   ├── api/
+    │   │   ├── nft-metadata.test.ts      # tokenURI: 301 contract-scoping, image fallback, 404
+    │   │   └── refund.test.ts            # refund guards: 409 claimed, receipt 400, idempotency
     │   ├── utils/
     │   │   ├── crypto.test.ts            # AES-256-GCM at-rest: wire, tamper, CBC fixture
+    │   │   ├── db.test.ts                # availability SQL: encrypted_key / redemption filters
     │   │   ├── xwing.test.ts             # X-Wing seed, blob layout, roundtrip, v1 dual-read
     │   │   └── helpers.test.ts           # toBytes32 / toHexBytes unit tests
     │   ├── HomeClient.claimCdKey.test.tsx # claim flow integration tests
@@ -186,7 +190,9 @@ confirm step). Failed claims KEEP the row. No v1→v2 migration — first public
    e. recordReserveRelease() audit log
    f. clearEncryptedKey deletes cd_keys.encrypted_key — LAST step, only after a–c passed;
       any failure keeps the row (retry/resume re-runs confirm; idempotent)
-8. (Optional) Refund within 14 days → POST /api/refund records in DB
+8. (Optional) Refund within 14 days → POST /api/refund verifies the refund tx
+   receipt via RPC (missing/reverted → 400), 409s confirmed-claim tokens, then
+   records in DB (append-only)
 ```
 
 **Refresh safety:** every on-chain write stores a PendingTx record (`utils/pendingTx.ts`) from the
@@ -241,7 +247,7 @@ One wallet popup per session. Session lives 8 hours.
 ```
 ENCRYPTION_KEY                        # AES-256 — must match Vercel exactly
 DATABASE_URL                          # Neon PostgreSQL connection string
-ALCHEMY_RPC_URL                       # for on-chain ownership verification
+ALCHEMY_RPC_URL                       # on-chain verification: confirm/refund receipts, SIWE owner check
 SESSION_SECRET                        # ≥32 bytes for iron-session (SIWE)
 NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
 NEXT_PUBLIC_VAULT_ADDRESS
@@ -262,10 +268,10 @@ pnpm test        # run once
 pnpm test:watch  # watch mode
 ```
 
-Tests in `nextjs/__tests__/`. 81 tests: 35 admin auth + claim flow + refresh-resume lifecycle
+Tests in `nextjs/__tests__/`. 98 tests: 35 admin auth + claim flow + refresh-resume lifecycle
 + helpers + crypto at-rest (GCM wire/tamper/CBC fixture) + X-Wing (seed, blob layout,
-roundtrip, v1 dual-read). Wagmi hooks and `window.ethereum` fully mocked — no wallet or DB
-needed.
+roundtrip, v1 dual-read) + refund route guards + db availability SQL + tokenURI metadata.
+Wagmi hooks and `window.ethereum` fully mocked — no wallet or DB needed.
 
 When updating `HomeClient.claimCdKey.test.tsx` for the new encryption scheme, the
 `window.ethereum` mock uses `personal_sign` (not `eth_getEncryptionPublicKey`). The mock

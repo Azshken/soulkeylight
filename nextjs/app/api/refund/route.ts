@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
+import { createPublicClient, http } from "viem";
+import { sepolia } from "viem/chains";
 
 import { recordRefund } from "@/utils/db";
 
@@ -83,6 +85,55 @@ export async function POST(req: NextRequest) {
     }
 
     const cdkeyId = mintRow.rows[0].cdkey_id as number;
+
+    // Claimed tokens are non-refundable on-chain: claiming moves the vault
+    // reserve to ReleasedByClaim, so processRefund reverts. Mirror that here —
+    // a confirmed redemption row (redemption_tx_hash set) means this key was
+    // claimed, and the refunds table is append-only: never record one.
+    const claimedRow = await sql`
+      SELECT 1 AS claimed
+      FROM redemptions
+      WHERE cdkey_id = ${cdkeyId}
+        AND redemption_tx_hash IS NOT NULL
+      LIMIT 1
+    `;
+    if (claimedRow.rows[0]) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Token already claimed; refunds are not recorded",
+        },
+        { status: 409 },
+      );
+    }
+
+    // Verify the refund tx actually succeeded before the append-only insert
+    // (same RPC pattern as /api/redeem/confirm; hardcoded sepolia client).
+    // viem throws when the receipt is missing — normalise that to the 400.
+    const rpcUrl = process.env.ALCHEMY_RPC_URL;
+    if (!rpcUrl) {
+      return NextResponse.json(
+        { success: false, error: "Server misconfiguration: missing RPC" },
+        { status: 500 },
+      );
+    }
+    const publicClient = createPublicClient({
+      chain: sepolia,
+      transport: http(rpcUrl),
+    });
+    const receipt = await publicClient
+      .getTransactionReceipt({ hash: refundTxHash as `0x${string}` })
+      .catch(() => null);
+    if (!receipt || receipt.status !== "success") {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Refund transaction missing or reverted on-chain; nothing was recorded",
+        },
+        { status: 400 },
+      );
+    }
 
     await recordRefund({
       cdkeyId,

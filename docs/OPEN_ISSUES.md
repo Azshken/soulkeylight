@@ -15,11 +15,12 @@ See Recently Resolved.)
 
 ## 🟡 Medium Priority
 
-### Dynamic NFT metadata endpoint — not fully implemented
-**Status:** Frozen CID redirect works. Dynamic JSON for unclaimed state is incomplete.
-**Todo:** Return complete ERC-721 metadata JSON for unclaimed tokens (name, description, image_cid,
-attributes from products table).
-**File:** `nextjs/app/api/nft/[contractAddress]/[tokenId]/route.ts`
+### Dynamic NFT metadata endpoint — DONE (12/09/26)
+Unclaimed JSON returns complete ERC-721 metadata (name, description, image, attributes).
+12/09/26 fixes: the frozen-CID lookup is contract-scoped (`mints.token_id` collided across
+games) and claimed tokens serve `image_claimed_cid` with `image_cid` fallback (same rule as
+the confirm route's Pinata payload). 301 to ipfs.io unchanged.
+Tests: `__tests__/api/nft-metadata.test.ts`.
 
 ### Chain sync — DB can go out of sync with on-chain state
 **Risk:** If a user interacts with SoulKey directly (not via frontend), the DB won't know. E.g. a
@@ -28,11 +29,11 @@ direct burn, a transfer (pre-claim), or a direct `claimCdKey` call bypassing `/a
 keep DB in sync. This is Milestone 3 in the ESP grant.
 **File:** New `nextjs/app/api/webhooks/alchemy/route.ts`
 
-### Deregistered game mint guard
-**Risk:** `is_active = false` hides a game from the mint UI but `/api/mint/get-commitment` may
-still issue keys if the route is called directly with the deregistered contract's address.
-**Fix:** Add `AND is_active = true` check in `get-commitment` route before reserving a key.
-**File:** `nextjs/app/api/mint/get-commitment/route.ts`
+### Deregistered game mint guard — ALREADY DONE in db.ts (verified 12/09/26)
+`reserveCDKeyForWallet` — the only key-issuing path behind get-commitment — already filters
+`p.is_active = TRUE` in both SELECTs (`nextjs/utils/db.ts`), so a deregistered contract cannot
+reserve keys even when the route is called directly. A second route-level check would be
+redundant; deliberately not added.
 
 ### Refund edge cases
 - Refunded keys: verify the re-issued key flow end-to-end (new user can mint and claim a previously
@@ -42,16 +43,14 @@ still issue keys if the route is called directly with the deregistered contract'
 - ETH vs stablecoin refund — if ETH price changed between mint and refund, the ETH value returned
   may differ from what was paid in stablecoin terms. Known limitation, not a bug.
 
-### Claimed-then-refunded rows look available in DB (pre-existing edge)
-The availability filter (`refunded_at >= minted_at`) in `reserveCDKeyForWallet` /
-`reserveAndMint` / `getAvailableKeyCount` also matches keys refunded AFTER a confirmed claim.
-Such rows are unusable: on-chain `commitmentInUse` stays set for claimed burns (the 12/09/26
-mint-cap fix made this explicit), so a fresh mint with that commitment reverts
-`CommitmentAlreadyUsed`; and their `encrypted_key` is NULL anyway (deleted at confirm).
-get-commitment can hand out such a poisoned reservation, burning user gas on a reverting mint.
-**Fix:** exclude post-claim refunds from the availability queries (e.g. require
-`encrypted_key IS NOT NULL`, or drop rows with a confirmed redemption).
-**File:** `nextjs/utils/db.ts`
+### Claimed-then-refunded rows look available in DB — FIXED (12/09/26)
+All availability queries (`reserveCDKeyForWallet` ×2, `getAvailableKeyCount`, `reserveAndMint`
+key pick) now require `ck.encrypted_key IS NOT NULL` on top of the existing
+`r.redemption_tx_hash IS NULL` filter. `clearEncryptedKey` NULLs the copy after a confirmed
+claim, so post-claim rows — whose `commitmentInUse` stays set on-chain — can never be offered
+again. `/api/refund` additionally 409s confirmed-claim tokens (DB mirror of the on-chain
+ReleasedByClaim non-refundability) and verifies the refund tx receipt via RPC before the
+append-only insert. Regression tests: `__tests__/utils/db.test.ts`, `__tests__/api/refund.test.ts`.
 
 ### import-keys — verify both paths use the same constraint
 Single key and batch import should both go through the same DB upsert with the UNIQUE constraint on
@@ -106,14 +105,14 @@ register/re-register form.
 **Files:** `nextjs/app/admin/AdminClient.tsx`, `nextjs/app/api/admin/register-game/route.ts`
 
 ### Stale references in docs/skills/*
-- `SKILL_FRONTEND.md` still documents the pre-v1 MetaMask encryption scheme
-  (`eth_getEncryptionPublicKey` / `eth_decrypt`, `CDKeyEncryption.tsx` — component deleted
-  31/03/26); v1 is personal_sign + HKDF + X25519 (`utils/x25519.ts`). Rewrite deliberately
-  deferred — out of scope for the refresh-resume work (12/09/26).
+- ~~`SKILL_FRONTEND.md` still documents the pre-v1 MetaMask encryption scheme~~ FIXED
+  12/09/26: encryption section rewritten — personal_sign → X-Wing (salt `soulkey-xwing-v2`)
+  + v1 X25519 dual-read; `eth_getEncryptionPublicKey` / `eth_decrypt` / `CDKeyEncryption.tsx`
+  references removed.
 - `SKILL_API_DB.md` points at `skills/references/GOTCHAS.md`, which never existed; bug history
   now lives in `docs/GOTCHAS.md` (stub) and the skills' own gotcha sections.
-- The skill docs' crypto sections are further outdated since X-Wing shipped (12/09/26) —
-  still deferred to a deliberate rewrite.
+- Remaining skill docs' crypto mentions (e.g. SKILL_API_DB) still predate X-Wing — deferred
+  to a deliberate rewrite (SKILL_FRONTEND done 12/09/26).
 
 ---
 
@@ -176,7 +175,8 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
 - [x] Key deletion atomicity fixed
 - [x] Pinata failure handling fixed (non-fatal, correct column names)
 - [x] SIWE admin auth implemented (iron-session + viem/siwe, 35 tests)
-- [x] Vitest test suite — 9 test files, 81 tests
+- [x] Vitest test suite — 12 test files, 98 tests
+- [x] Foundry test suite — 98/98 green (run externally 12/09/26)
 - [x] Replace eth_getEncryptionPublicKey / eth_decrypt — v1 X25519 shipped; v2 X-Wing is the
       default claim cipher (12/09/26)
 - [x] ~~Remove clearEncryptedKey from confirm flow~~ REVERSED 12/09/26 — clearEncryptedKey
@@ -184,8 +184,8 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
 - [ ] Redeploy game contracts for the mint-cap fix — Sepolia bytecode is immutable; the
       lifetime-mints-minus-refund-burns gate only applies to NEW deployments
 - [ ] Verify claim gas on Sepolia with the ~1.15 KB X-Wing blob (~800k gas expected per claim)
-- [ ] Deregistered game mint guard in get-commitment route
-- [ ] Dynamic NFT metadata endpoint (unclaimed JSON)
+- [x] Deregistered game mint guard — `p.is_active = TRUE` already enforced in db.ts (verified 12/09/26)
+- [x] Dynamic NFT metadata endpoint — contract-scoped frozen CID + image_claimed_cid fallback (12/09/26)
 - [ ] Chain sync event listener (Milestone 3)
 - [ ] ENCRYPTION_KEY rotation script written and documented
 - [ ] Cyfrin CodeHawks competitive audit — SoulKey.sol + MasterKeyVault.sol (Milestone 2)
@@ -195,6 +195,13 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
 
 ## Recently Resolved
 
+- ✅ Inventory: keys whose AES copy was deleted post-confirm are never offered again —
+  `encrypted_key IS NOT NULL` added to all availability SELECTs; `/api/refund` 409s
+  confirmed-claim tokens (DB mirror of ReleasedByClaim) and verifies the refund receipt via
+  RPC before the append-only insert (12/09/26)
+- ✅ tokenURI: frozen-CID lookup contract-scoped (cross-game `token_id` collision) + claimed
+  tokens serve `image_claimed_cid` with `image_cid` fallback; npm lockfile deleted so Vercel
+  cannot pick npm over pnpm (12/09/26)
 - ✅ X-Wing v2 claim cipher shipped — ML-KEM-768 + X25519 via `@noble/post-quantum` 0.7.1
   (pinned); on-chain blob `0x02 || xwingCt(1120) || nonce(12) || tag(16) || aesCt` (~1.15 KB);
   seed = HKDF-SHA256(full 65-byte personal_sign, salt "soulkey-xwing-v2", 32 B); reveal
@@ -206,7 +213,7 @@ Explored using Coinbase AgentKit to automate the mint → claim → reveal flow 
   `ivHex:ctHex` CBC rows still decrypt, tamper throws (12/09/26)
 - ✅ Mint-cap accounting fixed — gate = lifetime mints minus unclaimed refund burns
   (`_refundBurnedCount`); claimed burns no longer free slots; `setMaxSupply` uses the same
-  figure; Foundry tests added (forge not run locally) (12/09/26)
+  figure; Foundry tests added (forge suite since run externally: 98/98 green) (12/09/26)
 - ✅ Local dev environment repaired — lockfile regenerated, node_modules rebuilt; test + build
   green, lint runs with pre-existing style errors (12/09/26)
 - ✅ In-flight mint/claim/refund survive a page refresh — sessionStorage pending-tx record

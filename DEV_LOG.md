@@ -265,6 +265,25 @@ Refactoring the code:
   minus refund burns now. Sepolia bytecode is immutable — lands with the next deployment.
 - Env: regenerated the stale nextjs lockfile, rebuilt node_modules — build green again, 81/81
   tests, tsc clean. forge test on Fedora: 98/98.
+12/09/26 (inventory & metadata)
+
+- Closed the poison-reservation hole end to end: rows released by a confirmed claim
+  (encrypted_key NULLed, commitmentInUse still set on-chain) are now filtered out of every
+  availability SELECT, and /api/refund refuses confirmed-claim tokens (409) — the DB mirrors
+  the vault's ReleasedByClaim state instead of trusting the client or racing the chain.
+- /api/refund also fetches the refund receipt itself (same ALCHEMY_RPC_URL pattern as
+  confirm) before the append-only insert: a reverted or vanished tx can no longer mark a key
+  refundable. The refund_tx_hash idempotency check stays first, so refresh-resume retries
+  still converge on success.
+- tokenURI had a cross-game collision: the frozen-CID lookup keyed on mints.token_id alone,
+  but token IDs restart at 1 per contract — game A's token #1 could 301 to game B's frozen
+  metadata. Now joins through products with LOWER(contract_address). Claimed tokens without a
+  frozen CID (Pinata failed at claim) get image_claimed_cid in the dynamic JSON, image_cid
+  fallback — same rule as the Pinata payload.
+- Deleted nextjs/package-lock.json: with both lockfiles tracked, Vercel could pick npm and
+  install an untested tree.
+- Focused route/db tests instead of HomeClient surgery: +17 (refund guards, availability SQL
+  predicates, metadata JSON). Suite 98/98 / 12 files, tsc clean.
 
 Notes:
 

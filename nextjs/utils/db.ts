@@ -99,6 +99,7 @@ export async function reserveCDKeyForWallet(
         AND LOWER(ck.reserved_by) = LOWER(${walletAddress})
         AND ck.reserved_at >= NOW() - INTERVAL '15 minutes'
         AND r.redemption_tx_hash IS NULL
+        AND ck.encrypted_key IS NOT NULL
         AND (
           m.mint_id IS NULL
           OR EXISTS (
@@ -126,6 +127,7 @@ export async function reserveCDKeyForWallet(
         AND p.is_active = TRUE
         AND ck.reserved_by IS NULL
         AND r.redemption_tx_hash IS NULL
+        AND ck.encrypted_key IS NOT NULL
         AND (
           m.mint_id IS NULL
           OR EXISTS (
@@ -180,6 +182,7 @@ export async function getAvailableKeyCount(
         OR ck.reserved_at < NOW() - INTERVAL '15 minutes'
       )
       AND r.redemption_tx_hash IS NULL
+      AND ck.encrypted_key IS NOT NULL
       AND (
         m.mint_id IS NULL
         OR EXISTS (
@@ -222,6 +225,7 @@ export async function reserveAndMint(params: MintParams): Promise<CDKeyRow> {
       WHERE LOWER(ck.commitment_hash) IN (${normalizedHash}, ${prefixedHash})
         AND LOWER(p.contract_address) = LOWER(${params.contractAddress})
         AND r.redemption_tx_hash IS NULL
+        AND ck.encrypted_key IS NOT NULL
         AND (
           m.mint_id IS NULL
           OR EXISTS (

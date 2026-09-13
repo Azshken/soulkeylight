@@ -13,7 +13,7 @@ export async function GET(
     const tokenId = BigInt(rawTokenId);
 
     const result = await sql`
-      SELECT name, genre, description, image_cid
+      SELECT name, genre, description, image_cid, image_claimed_cid
       FROM products
       WHERE LOWER(contract_address) = LOWER(${contractAddress})
       LIMIT 1
@@ -24,14 +24,22 @@ export async function GET(
         { status: 404 },
       );
     }
-    const { name, genre, description, image_cid } = result.rows[0];
+    const { name, genre, description, image_cid, image_claimed_cid } =
+      result.rows[0];
 
-    // After fetching product from DB, also check for frozen metadata:
+    // After fetching product from DB, also check for frozen metadata.
+    // mints.token_id is scoped PER CONTRACT (no global unique — each game
+    // starts at 1), so this lookup must join through products and filter on
+    // the contract address; keying on token_id alone collides across games.
     const redemptionResult = await sql`
       SELECT r.frozen_metadata_cid
       FROM mints m
-      JOIN redemptions r ON r.cdkey_id = m.cdkey_id
+      JOIN cd_keys ck ON ck.id = m.cdkey_id
+      JOIN batches b ON b.batch_id = ck.batch_id
+      JOIN products p ON p.product_id = b.product_id
+      JOIN redemptions r ON r.cdkey_id = ck.id
       WHERE m.token_id = ${tokenId.toString()}
+      AND LOWER(p.contract_address) = LOWER(${contractAddress})
       AND r.frozen_metadata_cid IS NOT NULL
       LIMIT 1
     `;
@@ -62,12 +70,16 @@ export async function GET(
     `;
     const isClaimed = !!claimResult.rows[0]?.redeemed_at;
 
+    // Same fallback as the confirm route's Pinata payload: claimed cover art
+    // when present, else the storefront image.
+    const imageCid = isClaimed ? image_claimed_cid || image_cid : image_cid;
+
     const metadata = {
       name: `${name} CD Key #${tokenId}`,
       description:
         description ||
         `A game key for ${name}. Claim it on-chain to receive your CD key.`,
-      image: image_cid ? `ipfs://${image_cid}` : "",
+      image: imageCid ? `ipfs://${imageCid}` : "",
       external_url: process.env.NEXT_PUBLIC_APP_URL ?? "",
       attributes: [
         { trait_type: "Game", value: name },

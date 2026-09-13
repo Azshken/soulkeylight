@@ -5,7 +5,8 @@ description: >
   whenever modifying HomeClient.tsx, AdminClient.tsx, any component, any page,
   or Providers.tsx. Triggers on: "HomeClient", "AdminClient", "wagmi hook",
   "RainbowKit", "ConnectButton", "useReadContract", "writeContractAsync",
-  "handleClaimCDKey", "handleMint", "handleRefund", "receipt.status", UI layout,
+  "handleClaimCDKey", "handleMint", "handleRefund", "deriveClaimKeys", "X-Wing",
+  "personal_sign", "receipt.status", UI layout,
   wallet connection behaviour, or SIWE sign-in flow in the admin UI.
   DO NOT use for: API routes, database queries, Solidity contracts, or
   Foundry tests — use soulkey-api-db or soulkey-contracts instead.
@@ -99,32 +100,44 @@ The **server** is the real guard (it fetches its own receipt). The frontend chec
 
 ---
 
-## MetaMask Encryption (CDKeyEncryption.tsx)
+## Wallet Encryption: personal_sign → X-Wing (v2), X25519 (v1 dual-read)
 
 ```typescript
-// 1. Get user's public key
-const pubKey = await window.ethereum.request({
-  method: 'eth_getEncryptionPublicKey',
-  params: [userAddress]
+// HomeClient.tsx — deriveClaimKeys: ONE personal_sign feeds both schemes
+const sig = await window.ethereum.request({
+  method: 'personal_sign',
+  params: [`SoulKey encryption key v1\nAddress: ${wallet}`, wallet],
 });
-
-// 2. Server re-encrypts CD key with this public key (x25519-xsalsa20-poly1305)
-
-// 3. User decrypts locally with MetaMask
-const decrypted = await window.ethereum.request({
-  method: 'eth_decrypt',
-  params: [encryptedKey, userAddress]
-});
+// v2 (default): HKDF-SHA256(IKM = full 65-byte sig, salt "soulkey-xwing-v2", 32)
+//   → X-Wing seed → ml_kem768_x25519.keygen(seed)   (utils/xwing.ts)
+// v1 (legacy):  HKDF-SHA256(IKM = full 65-byte sig, salt "soulkey-hybrid-v1", 32)
+//   → X25519 secret key → X25519 public key          (utils/x25519.ts)
 ```
 
-⚠️ `eth_getEncryptionPublicKey` is deprecated in MetaMask Flask and unsupported in non-MetaMask wallets. Known structural risk — see `docs/OPEN_ISSUES.md`.
+- **Claim:** POST `/api/redeem` with `xwingPublicKey` (1,216 B). The legacy 32-byte
+  `x25519PublicKey` is still sent alongside for deploy-skew; the server prefers X-Wing and
+  returns the v2 blob `0x02 || xwingCt(1120) || nonce(12) || tag(16) || aesCt` (~1.15 KB),
+  which `claimCdKey` writes on-chain.
+- **Reveal:** `decryptClaimCiphertextWebCrypto(hex, { x25519SecretKey, xwingSeed })`
+  dual-reads both versions — 0x02-prefixed blob ≥1150 bytes → X-Wing; unprefixed → v1
+  X25519. Tokens claimed before 12/09/26 still decrypt.
+- Both keypairs live in ONE `useRef` cache (`claimKeysRef`), cleared on wallet change:
+  claim + immediate reveal = one `personal_sign` prompt per session.
+
+⚠️ HKDF IKM is the FULL 65-byte signature — never `.slice(0, 32)` (halves entropy silently
+and changes the derived keypairs). See GOTCHAS.md.
+⚠️ `eth_getEncryptionPublicKey` / `eth_decrypt` are DEAD — never reintroduce them. The
+`CDKeyEncryption.tsx` component that used them was deleted 31/03/26; personal_sign + X25519
+shipped as v1, and X-Wing (ML-KEM-768 + X25519, `@noble/post-quantum` 0.7.1) became the
+default claim cipher 12/09/26. No HQC, no McEliece, no homemade hybrid.
 
 ---
 
 ## Helper Utilities
 
 - `utils/helpers.ts` — `toBytes32`, `toHexBytes`. Must be importable without rendering any component (needed for tests).
-- `utils/crypto.ts` — server-side only. AES-256 encrypt + keccak256 hash.
+- `utils/crypto.ts` — server-side only. AES-256-GCM at rest (`v2gcm:` writes, legacy CBC dual-read), `encryptWithXWing` (v2) / `encryptWithX25519` (v1), keccak256 hash.
+- `utils/xwing.ts` / `utils/x25519.ts` — browser derivation from one `personal_sign` + WebCrypto decrypt (v2 / v1 dual-read).
 - `utils/adminSession.ts` — iron-session config + `requireAdminSession`. Do not duplicate session reads in individual routes.
 
 ---
