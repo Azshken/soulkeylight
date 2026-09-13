@@ -186,7 +186,9 @@ confirm step). Failed claims KEEP the row. No v1→v2 migration — first public
    e. recordReserveRelease() audit log
    f. clearEncryptedKey deletes cd_keys.encrypted_key — LAST step, only after a–c passed;
       any failure keeps the row (retry/resume re-runs confirm; idempotent)
-8. (Optional) Refund within 14 days → POST /api/refund records in DB
+8. (Optional) Refund within 14 days → POST /api/refund verifies the refund tx
+   receipt via RPC (missing/reverted → 400), 409s confirmed-claim tokens, then
+   records in DB (append-only)
 ```
 
 **Refresh safety:** every on-chain write stores a PendingTx record (`utils/pendingTx.ts`) from the

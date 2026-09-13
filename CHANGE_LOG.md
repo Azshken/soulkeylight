@@ -93,3 +93,27 @@
 - Supersedes DECISIONS.md (April): HKDF length-96 v2 expansion and AES-copy retention are dead.
 - Local env repaired: nextjs pnpm-lock.yaml regenerated (was stale), build green again,
   81/81 tests (9 files) + tsc clean.
+12/09/26 — inventory & metadata (feat/inventory-and-metadata)
+
+- Inventory: every availability SELECT (reserveCDKeyForWallet ×2, getAvailableKeyCount,
+  reserveAndMint key pick) now requires ck.encrypted_key IS NOT NULL — keys released by a
+  confirmed claim (clearEncryptedKey) can never be offered again; their commitmentInUse stays
+  set on-chain, so re-minting them would revert. The mint_tx_hash idempotency lookup in
+  reserveAndMint is deliberately unfiltered (link-token retries must still resolve).
+- /api/refund: confirmed-claim tokens 409 ("Token already claimed; refunds are not recorded")
+  — DB mirror of the on-chain ReleasedByClaim non-refundability. The refund tx receipt is
+  verified via ALCHEMY_RPC_URL (hardcoded sepolia client, same pattern as confirm) BEFORE the
+  append-only insert; missing/reverted → 400. refund_tx_hash idempotency still short-circuits
+  first. Refunds stay append-only; no on-chain ReserveStatus read.
+- tokenURI (/api/nft/[contractAddress]/[tokenId]): frozen-CID lookup is contract-scoped — it
+  keyed on mints.token_id alone, which is unique only PER GAME (token #1 of game A could 301
+  to game B's frozen metadata). Dynamic JSON now serves image_claimed_cid when claimed with
+  image_cid fallback (same rule as the confirm Pinata payload). 301 + short Cache-Control
+  unchanged.
+- Deleted nextjs/package-lock.json — pnpm-lock.yaml is the only lockfile, so Vercel cannot
+  pick npm.
+- OPEN_ISSUES: get-commitment is_active guard = already done in db.ts; claimed-then-refunded
+  edge FIXED; dynamic metadata endpoint DONE; forge ticked 98/98 (Fedora).
+- Tests: +7 refund route, +4 db availability SQL, +6 nft metadata. Suite: 98 tests / 12
+  files; tsc clean.
+
