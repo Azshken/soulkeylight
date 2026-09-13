@@ -105,14 +105,14 @@ register/re-register form.
 **Files:** `nextjs/app/admin/AdminClient.tsx`, `nextjs/app/api/admin/register-game/route.ts`
 
 ### Stale references in docs/skills/*
-- `SKILL_FRONTEND.md` still documents the pre-v1 MetaMask encryption scheme
-  (`eth_getEncryptionPublicKey` / `eth_decrypt`, `CDKeyEncryption.tsx` — component deleted
-  31/03/26); v1 is personal_sign + HKDF + X25519 (`utils/x25519.ts`). Rewrite deliberately
-  deferred — out of scope for the refresh-resume work (12/09/26).
+- ~~`SKILL_FRONTEND.md` still documents the pre-v1 MetaMask encryption scheme~~ FIXED
+  12/09/26: encryption section rewritten — personal_sign → X-Wing (salt `soulkey-xwing-v2`)
+  + v1 X25519 dual-read; `eth_getEncryptionPublicKey` / `eth_decrypt` / `CDKeyEncryption.tsx`
+  references removed.
 - `SKILL_API_DB.md` points at `skills/references/GOTCHAS.md`, which never existed; bug history
   now lives in `docs/GOTCHAS.md` (stub) and the skills' own gotcha sections.
-- The skill docs' crypto sections are further outdated since X-Wing shipped (12/09/26) —
-  still deferred to a deliberate rewrite.
+- Remaining skill docs' crypto mentions (e.g. SKILL_API_DB) still predate X-Wing — deferred
+  to a deliberate rewrite (SKILL_FRONTEND done 12/09/26).
 
 ---
 
