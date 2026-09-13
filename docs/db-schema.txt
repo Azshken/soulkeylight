@@ -10,8 +10,8 @@
 --     /api/redeem/confirm (12/09/26). A failed claim KEEPS the row. No v1→v2 migration.
 --   * mints.token_id is NOT globally unique. Scope is per game.
 --   * One mints row and one refunds row per cdkey_id. Remint/re-refund UPDATE.
---   * Key is available iff no confirmed redemption AND
---       (no mint OR refunded_at >= minted_at) AND reserved_by IS NULL.
+--   * Key is available iff encrypted_key IS NOT NULL AND no confirmed
+--       redemption AND (no mint OR refunded_at >= minted_at) AND reserved_by IS NULL.
 --   * Never DELETE cd_keys rows.
 --
 -- Live Neon (2026-09-05 dump) notes:

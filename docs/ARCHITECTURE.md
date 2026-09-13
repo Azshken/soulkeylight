@@ -297,11 +297,16 @@ POST /api/redeem/confirm
   → 5% fee retained, remainder returned
 
 POST /api/refund
-  → INSERT into refunds table
+  → live-mint check (minted, not already refunded) — else 404
+  → confirmed redemption on the cdkey → 409 (DB mirror of the on-chain
+    ReleasedByClaim state: claimed tokens are non-refundable)
+  → refund tx receipt verified via ALCHEMY_RPC_URL — missing/reverted → 400
+  → INSERT into refunds table (append-only)
   → cd_key becomes available again (db.ts checks refunds table)
   Note: only UNCLAIMED refund burns free an on-chain mint slot (commitmentInUse
-  cleared); claimed burns never do. See OPEN_ISSUES for the claimed-then-refunded
-  availability edge.
+  cleared); claimed burns never do. The claimed-then-refunded availability edge
+  is FIXED (12/09/26): every availability SELECT requires
+  encrypted_key IS NOT NULL, so post-confirm rows are never offered.
 ```
 
 ### Admin Auth — SIWE (EIP-4361)
