@@ -265,6 +265,7 @@ Refactoring the code:
   minus refund burns now. Sepolia bytecode is immutable — lands with the next deployment.
 - Env: regenerated the stale nextjs lockfile, rebuilt node_modules — build green again, 81/81
   tests, tsc clean. forge test on Fedora: 98/98.
+
 12/09/26 (inventory & metadata)
 
 - Closed the poison-reservation hole end to end: rows released by a confirmed claim
@@ -284,6 +285,19 @@ Refactoring the code:
   install an untested tree.
 - Focused route/db tests instead of HomeClient surgery: +17 (refund guards, availability SQL
   predicates, metadata JSON). Suite 98/98 / 12 files, tsc clean.
+
+13/09/26
+
+- Production Vercel on 4f4ce4c. Smoke-tested the live shop: mint, refresh-resume, X-Wing
+  claim, reveal, claimed refund reverted on Etherscan. Unclaimed refund remints. New batch
+  encrypts with AES-GCM.
+- Claim gas on Sepolia is 946,011 — not the 800k guess. Acceptable on L2.
+- Vercel still invoked npm install despite the deleted package-lock. Next: pin packageManager.
+
+23/09/26
+
+- Rewrote docs/OPEN_ISSUES.md. Medium now only lists work that is still open (pnpm pin,
+  SoulKey cap redeploy, chain helper, Alchemy, AES rotation, import-keys check).
 
 Notes:
 
