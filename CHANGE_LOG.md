@@ -93,6 +93,7 @@
 - Supersedes DECISIONS.md (April): HKDF length-96 v2 expansion and AES-copy retention are dead.
 - Local env repaired: nextjs pnpm-lock.yaml regenerated (was stale), build green again,
   81/81 tests (9 files) + tsc clean.
+
 12/09/26 — inventory & metadata (feat/inventory-and-metadata)
 
 - Inventory: every availability SELECT (reserveCDKeyForWallet ×2, getAvailableKeyCount,
@@ -110,10 +111,21 @@
   to game B's frozen metadata). Dynamic JSON now serves image_claimed_cid when claimed with
   image_cid fallback (same rule as the confirm Pinata payload). 301 + short Cache-Control
   unchanged.
-- Deleted nextjs/package-lock.json — pnpm-lock.yaml is the only lockfile, so Vercel cannot
-  pick npm.
-- OPEN_ISSUES: get-commitment is_active guard = already done in db.ts; claimed-then-refunded
-  edge FIXED; dynamic metadata endpoint DONE; forge ticked 98/98 (Fedora).
+- Deleted nextjs/package-lock.json — pnpm-lock.yaml is the only lockfile.
 - Tests: +7 refund route, +4 db availability SQL, +6 nft metadata. Suite: 98 tests / 12
   files; tsc clean.
 
+13/09/26 — production smoke
+
+- Vercel production Ready on main 4f4ce4c (soulkey.vercel.app). Install log still ran
+  `npm install` (peer warnings only); pin packageManager + Vercel Install Command next.
+- Full loop on Ethereum Sepolia: mint → refresh-resume → X-Wing claim → reveal → claimed
+  refund reverted on-chain. Unclaimed refund + remint OK. New import batch is v2gcm.
+- claimCdKey gas measured: 946,011 (tx 0x2f27049e71c13ae2d6637078707ad7acb615b387ce98d66c15342ee444cb2991,
+  token 51, game 0x872952D3a86e0cBd8E56aF38f73bce1A28D356EF). Higher than the 800k guess;
+  fine on L2, not a reason to stay on Ethereum L1.
+
+23/09/26
+
+- docs/OPEN_ISSUES.md rewritten to current state: DONE items removed from Medium; claim gas
+  ticked; remaining work is pnpm pin, SoulKey redeploy, chain helper, Alchemy, AES rotation.
